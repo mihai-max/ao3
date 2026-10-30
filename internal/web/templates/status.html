@@ -30,10 +30,15 @@
 {{end}}
 <h2>Paths</h2>
 <dl class="tags">
-  <dt>Data (zips)</dt><dd><code>{{.DataDir}}</code></dd>
+  <dt>Data (zips)</dt><dd><code>{{.DataDir}}</code>{{if .Mount}} ← {{.Mount.Describe}}{{end}}</dd>
+  {{if .Mount}}<dt>Remote mount</dt><dd>{{if .Mount.Mounted}}mounted{{else}}<span class="warn">not mounted</span>{{end}}{{if .Mount.Restarts}} · rclone restarted {{.Mount.Restarts}} times{{end}}{{if .Mount.LastErr}}<br><code>{{.Mount.LastErr}}</code>{{end}}</dd>{{end}}
   <dt>Index file</dt><dd><code>{{.DBPath}}</code></dd>
   <dt>Summary search</dt><dd>{{if .FTSSum}}on{{else}}off (set AO3_FTS_SUMMARY=true before the first index to turn it on){{end}}</dd>
 </dl>
+{{if and .Mount .Mount.Recent}}
+<h2>Recent rclone output</h2>
+<ul class="errors">{{range .Mount.Recent}}<li><code>{{.}}</code></li>{{end}}</ul>
+{{end}}
 {{if .Notes}}
 <h2>Notes shipped with the torrent</h2>
 {{range $name, $text := .Notes}}<h3>{{$name}}</h3><pre class="note">{{$text}}</pre>{{end}}

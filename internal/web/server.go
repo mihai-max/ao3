@@ -25,6 +25,7 @@ import (
 	"github.com/mihai-max/ao3/internal/archive"
 	"github.com/mihai-max/ao3/internal/epub"
 	"github.com/mihai-max/ao3/internal/index"
+	"github.com/mihai-max/ao3/internal/rmount"
 )
 
 //go:embed templates/*.html
@@ -41,6 +42,8 @@ type Server struct {
 	Logger  *log.Logger
 	// BaseCtx is used for indexing runs started from the status page.
 	BaseCtx context.Context
+	// Mount is the rclone mount serving DataDir, or nil for a local folder.
+	Mount *rmount.Mount
 
 	pages  map[string]*template.Template
 	policy *bluemonday.Policy
@@ -97,6 +100,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.DB.SQL.PingContext(r.Context()); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if s.Mount != nil && !s.Mount.Mounted() {
+			http.Error(w, "remote storage is not mounted", http.StatusServiceUnavailable)
 			return
 		}
 		w.Write([]byte("ok\n"))
@@ -441,8 +448,17 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		DataDir   string
 		Notes     map[string]string
 		FTSSum    bool
+		Mount     *rmount.State
 	}{s.common("Index status"), st, totalSize, doneSize, s.DB.Count(ctx), s.DB.SizeOnDisk(), s.DB.Path,
-		s.DataDir, archive.Notes(s.DataDir), s.DB.FTSSummary})
+		s.DataDir, archive.Notes(s.DataDir), s.DB.FTSSummary, mountState(s.Mount)})
+}
+
+func mountState(m *rmount.Mount) *rmount.State {
+	if m == nil {
+		return nil
+	}
+	st := m.State()
+	return &st
 }
 
 func (s *Server) scan(w http.ResponseWriter, r *http.Request) {

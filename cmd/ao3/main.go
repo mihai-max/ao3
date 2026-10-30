@@ -29,6 +29,7 @@ import (
 	"github.com/mihai-max/ao3/internal/epub"
 	"github.com/mihai-max/ao3/internal/index"
 	"github.com/mihai-max/ao3/internal/privdrop"
+	"github.com/mihai-max/ao3/internal/rmount"
 	"github.com/mihai-max/ao3/internal/web"
 )
 
@@ -103,6 +104,22 @@ func main() {
 	}
 }
 
+// mountRemote starts the rclone mount when one is configured through the
+// environment. It must run before privileges are dropped.
+func mountRemote(ctx context.Context, c *config) (*rmount.Mount, error) {
+	cfg := rmount.FromEnv(c.data)
+	if !cfg.Enabled() {
+		return nil, nil
+	}
+	cfg.Logger = log.Default()
+	log.Printf("rclone: mounting %s at %s", cfg.Describe(), c.data)
+	m, err := rmount.Start(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("mounting %s: %w", cfg.Describe(), err)
+	}
+	return m, nil
+}
+
 func openDB(c *config) (*index.DB, error) {
 	if err := privdrop.Drop(filepath.Dir(c.index)); err != nil {
 		return nil, fmt.Errorf("switching to PUID/PGID: %w", err)
@@ -125,6 +142,24 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	mnt, err := mountRemote(ctx, c)
+	if err != nil {
+		return err
+	}
+	if mnt != nil {
+		defer mnt.Close()
+		go func() {
+			// If rclone gives up for good, exit so Docker restarts the container.
+			select {
+			case <-mnt.Done():
+				if ctx.Err() == nil {
+					log.Printf("rclone: mount is gone and could not be restored, exiting")
+					stop()
+				}
+			case <-ctx.Done():
+			}
+		}()
+	}
 	db, err := openDB(c)
 	if err != nil {
 		return err
@@ -137,6 +172,9 @@ func serve(args []string) error {
 		return err
 	}
 	srv.BaseCtx = ctx
+	if mnt != nil {
+		srv.Mount = mnt
+	}
 
 	done := make(chan struct{})
 	if c.autoIndex {
@@ -153,6 +191,7 @@ func serve(args []string) error {
 	hs := &http.Server{Addr: c.addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
+		logger.Printf("shutting down: stopping web server")
 		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		hs.Shutdown(shut)
@@ -162,6 +201,7 @@ func serve(args []string) error {
 		return err
 	}
 	<-done // let the indexer commit its last batch
+	logger.Printf("shutting down: index closed, web server stopped")
 	return nil
 }
 
@@ -174,6 +214,13 @@ func runIndex(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	mnt, err := mountRemote(ctx, c)
+	if err != nil {
+		return err
+	}
+	if mnt != nil {
+		defer mnt.Close()
+	}
 	db, err := openDB(c)
 	if err != nil {
 		return err
@@ -199,6 +246,14 @@ func inspect(args []string) error {
 		return errors.New("usage: ao3 inspect [-n 5] FILE.zip|DATA_DIR")
 	}
 	target := fs.Arg(0)
+	if cfg := rmount.FromEnv(env("AO3_DATA", "/data")); cfg.Enabled() && strings.HasPrefix(filepath.Clean(target)+"/", filepath.Clean(cfg.MountPoint)+"/") {
+		cfg.Logger = log.Default()
+		m, err := rmount.Start(context.Background(), cfg)
+		if err != nil {
+			return err
+		}
+		defer m.Close()
+	}
 	if st, err := os.Stat(target); err == nil && st.IsDir() {
 		return inspectDir(target)
 	}

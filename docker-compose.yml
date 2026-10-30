@@ -1,8 +1,13 @@
 # Plain Docker / Docker Compose. On Unraid use unraid/ao3.xml instead.
 #
-#   ./zips   the folder the torrent downloaded into (the 105 .zip files)
-#   ./index  where the SQLite index is written (~30 GB for ~20M works)
+# Two ways to give the app the torrent's 105 zip files:
 #
+#   A) Local folder: put them in ./zips (the default below).
+#   B) Real-Debrid: add the magnet to Real-Debrid, then fill in the
+#      AO3_WEBDAV_* variables and uncomment the cap_add/devices/security_opt
+#      lines so rclone can mount the WebDAV share inside the container.
+#
+# ./index is where the SQLite index is written (~30 GB for ~20M works).
 # Both are bind mounts to folders on your disk; nothing is kept inside the
 # container image or in a Docker-managed volume.
 services:
@@ -17,6 +22,18 @@ services:
       PGID: "1000"
       AO3_INDEX_WORKERS: "0"   # 0 = use every CPU while indexing
       AO3_FTS_SUMMARY: "false" # true = summaries searchable, ~20% bigger index
+      # --- B) Real-Debrid (or any WebDAV) instead of ./zips ---
+      # AO3_WEBDAV_URL: "https://dav.real-debrid.com/"
+      # AO3_WEBDAV_USER: "your-real-debrid-username"
+      # AO3_WEBDAV_PASS: "your-real-debrid-WEBDAV-password"   # not the login password
+      # AO3_WEBDAV_PATH: "torrents/things"
     volumes:
-      - ./zips:/data:ro
+      - ./zips:/data:ro        # A) remove this line when using B)
       - ./index:/index
+    # --- needed for B) so rclone can create a FUSE mount ---
+    # cap_add:
+    #   - SYS_ADMIN
+    # devices:
+    #   - /dev/fuse
+    # security_opt:
+    #   - apparmor:unconfined

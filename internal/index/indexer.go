@@ -99,8 +99,10 @@ type zipState struct {
 }
 
 type job struct {
-	z *zipState
-	f *zip.File
+	z   *zipState
+	f   *zip.File
+	raw []byte // compressed member bytes, read by the producer
+	err error  // read error, reported by the worker
 }
 
 type result struct {
@@ -186,9 +188,17 @@ func (ix *Indexer) run(ctx context.Context) error {
 			zs.zr = zr
 			zs.total = int64(len(zr.File))
 			results <- result{z: zs, start: true}
+			// The producer alone reads the zip, member after member in file
+			// order, so the underlying file (a disk, or an rclone mount over
+			// WebDAV) sees one sequential stream. Workers only decompress and
+			// parse what they are handed.
 			for _, f := range zr.File {
+				j := job{z: zs, f: f}
+				if isEPUB(f) {
+					j.raw, j.err = readRaw(f)
+				}
 				select {
-				case jobs <- job{z: zs, f: f}:
+				case jobs <- j:
 				case <-ctx.Done():
 					return
 				}
@@ -264,29 +274,61 @@ func (ix *Indexer) addErrLocked(msg string) {
 	}
 }
 
+func isEPUB(f *zip.File) bool {
+	return !f.FileInfo().IsDir() && strings.EqualFold(filepath.Ext(f.Name), ".epub")
+}
+
+// readRaw returns a member's bytes exactly as stored in the zip, without
+// decompressing them.
+func readRaw(f *zip.File) ([]byte, error) {
+	if f.UncompressedSize64 > archive.MaxMemberSize {
+		return nil, fmt.Errorf("too large (%d bytes)", f.UncompressedSize64)
+	}
+	rc, err := f.OpenRaw()
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 0, f.CompressedSize64)
+	buf, err = appendAll(buf, rc)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func appendAll(buf []byte, r io.Reader) ([]byte, error) {
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return buf, err
+		}
+	}
+}
+
 func process(j job) result {
 	f := j.f
 	r := result{z: j.z}
-	if f.FileInfo().IsDir() || !strings.EqualFold(filepath.Ext(f.Name), ".epub") {
+	if !isEPUB(f) {
 		return r
 	}
 	r.epub = true
+	if j.err != nil {
+		r.err = j.err
+		return r
+	}
 	m, err := archive.MemberOf(j.z.Name, f)
 	if err != nil {
 		r.err = err
 		return r
 	}
-	if m.Size > archive.MaxMemberSize {
-		r.err = fmt.Errorf("too large (%d bytes)", m.Size)
-		return r
-	}
-	rc, err := f.Open()
-	if err != nil {
-		r.err = err
-		return r
-	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
+	data, err := archive.Decompress(j.raw, m.Method, m.Size)
 	if err != nil {
 		r.err = err
 		return r

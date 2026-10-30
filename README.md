@@ -9,6 +9,8 @@ extracting a single zip. One self-contained Docker image, published to
   into one SQLite file with full-text search (SQLite is built into the binary).
 - Reads chapters in the browser, sanitized, with images, light and dark mode.
 - Downloads the original `.epub` byte for byte.
+- Reads the zips from a local folder, or straight from Real-Debrid's WebDAV
+  through a built-in rclone mount, so you never download the 746 GiB yourself.
 - Nothing is stored in the image or a Docker volume: the index is a file in a
   host folder you choose.
 
@@ -72,11 +74,60 @@ expect a few hours, mostly limited by disk read speed. It is resumable. If
 the container stops, finished zips are kept and an interrupted zip is redone
 from its start.
 
+## Use Real-Debrid instead of downloading the torrent
+
+If you have a Real-Debrid account you can skip the 746 GiB download. Add the
+magnet to Real-Debrid, and the container mounts Real-Debrid's WebDAV share
+with rclone and reads the zips over your internet connection. The index is
+still built and stored locally.
+
+1. On Real-Debrid, add the magnet link under **Torrents** and wait until it
+   shows as finished. Real-Debrid keeps it as a folder named after the
+   torrent, `things`, so the files appear on WebDAV at `/torrents/things/`.
+2. On your Real-Debrid account page, find the **WebDAV** section and note the
+   WebDAV password. It is a separate password, not your login password and
+   not the API token. Your WebDAV username is your Real-Debrid username.
+3. Give the container those two values and FUSE access, and leave the Data
+   folder unmapped:
+
+```bash
+docker run -d --name ao3 -p 8080:8080 \
+  --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor:unconfined \
+  -e PUID=1000 -e PGID=1000 \
+  -e AO3_WEBDAV_USER=your-real-debrid-username \
+  -e AO3_WEBDAV_PASS=your-webdav-password \
+  -v /path/to/ao3-index:/index \
+  ghcr.io/mihai-max/ao3:latest
+```
+
+On Unraid, fill in **Real-Debrid username** and **Real-Debrid WebDAV
+password** in the template and leave **Data folder** empty. The template
+already carries the FUSE parameters.
+
+What to expect:
+
+| | |
+|---|---|
+| Indexing | reads all 746 GiB once over the internet. On a gigabit line that is 2 to 3 hours at best, usually longer because Real-Debrid limits speed per connection. It resumes if interrupted. |
+| Opening a work | one range request per EPUB, so about half a second to two seconds before a chapter shows. Chapters of the same work are then instant. |
+| Downloads | the EPUB is fetched from Real-Debrid and passed through. |
+| Real-Debrid limits | about 16 parallel connections per account, and the WebDAV listing only shows the newest 200 torrents. Links expire after a while, but WebDAV refreshes them on access. |
+
+The status page shows whether the mount is up and the last lines rclone
+printed. If rclone dies, it is restarted with a growing delay. After ten
+failures in a row the container exits so Docker restarts it.
+
+Other WebDAV servers work the same way: set `AO3_WEBDAV_URL`, and
+`AO3_WEBDAV_PATH` to the folder that holds the zips. If you already have an
+rclone remote, map your `rclone.conf` to `/config/rclone.conf` and set
+`AO3_RCLONE_REMOTE=remote:path`. `AO3_RCLONE_ARGS` adds flags to the mount
+command, for example `--tpslimit 4` to go easier on a server.
+
 ## Where things are stored
 
 | Inside the container | What | Unraid default | Docker Compose default |
 |---|---|---|---|
-| `/data` (read-only) | the torrent's 105 zips and 2 txt files | `/mnt/user/data/things` | `./zips` |
+| `/data` (read-only) | the torrent's 105 zips and 2 txt files, or the rclone mount of them | `/mnt/user/data/things`, or empty with Real-Debrid | `./zips` |
 | `/index` (read-write) | `ao3.db` plus `ao3.db-wal` and `ao3.db-shm` | `/mnt/user/appdata/ao3` | `./index` |
 
 So on Unraid the index is **`/mnt/user/appdata/ao3/ao3.db`**. If your appdata
@@ -134,6 +185,15 @@ docker run --rm -v /mnt/user/data/things:/data:ro ghcr.io/mihai-max/ao3:latest i
 docker run --rm -v /mnt/user/data/things:/data:ro ghcr.io/mihai-max/ao3:latest inspect -n 3 /data/queue85.zip
 ```
 
+With Real-Debrid, pass the WebDAV variables and FUSE flags instead of the
+folder, and `inspect` mounts the share for the duration of the command:
+
+```bash
+docker run --rm --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor:unconfined \
+  -e AO3_WEBDAV_USER=you -e AO3_WEBDAV_PASS=webdav-password \
+  ghcr.io/mihai-max/ao3:latest inspect -n 3 /data/queue85.zip
+```
+
 The first command prints both txt notes and the zip order. The second prints
 the member count, file extensions, compression method and the parsed metadata
 of the first EPUBs. `queue85.zip` is the smallest zip at 437 MiB. If the
@@ -172,6 +232,12 @@ On a tie, the zip listed later in `zip_order.txt` wins.
 | `AO3_AUTO_INDEX` | `true` | index new or unfinished zips at start |
 | `AO3_INDEX_WORKERS` | `0` | EPUB parser threads, 0 means all CPUs |
 | `AO3_FTS_SUMMARY` | `false` | make summaries searchable, applies to a new index only |
+| `AO3_WEBDAV_USER` | unset | WebDAV username; setting it turns on the rclone mount at `/data` |
+| `AO3_WEBDAV_PASS` | unset | WebDAV password (for Real-Debrid, the WebDAV password from the account page) |
+| `AO3_WEBDAV_URL` | `https://dav.real-debrid.com/` | WebDAV server |
+| `AO3_WEBDAV_PATH` | `torrents/things` | folder on the share that holds the zips |
+| `AO3_RCLONE_REMOTE` | unset | `remote:path` from your own `rclone.conf` at `/config/rclone.conf`, instead of the WebDAV fields |
+| `AO3_RCLONE_ARGS` | unset | extra flags for `rclone mount` |
 
 Commands: `serve` (default), `index [--only queue85.zip]`, `inspect`,
 `healthcheck`, `version`. To rebuild the index from scratch, stop the
@@ -180,7 +246,8 @@ container, delete the files in the Index folder and start it again.
 ## Publishing to ghcr.io
 
 [`.github/workflows/ghcr.yml`](.github/workflows/ghcr.yml) runs the tests and
-pushes a multi-arch image (amd64 and arm64) on every push.
+pushes a multi-arch image (amd64 and arm64) on every push. The image is the
+official `rclone/rclone` Alpine image plus the `ao3` binary, about 150 MB.
 
 | Push to | Image tag |
 |---|---|
@@ -224,4 +291,5 @@ Layout:
 | `internal/index` | SQLite schema, FTS5 search, the parallel resumable indexer |
 | `internal/web` | HTTP handlers, chapter rendering and sanitizing, templates |
 | `internal/privdrop` | PUID and PGID handling |
+| `internal/rmount` | supervised `rclone mount` of a WebDAV share |
 | `unraid/` | Unraid template and icon |

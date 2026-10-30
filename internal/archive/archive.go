@@ -5,7 +5,7 @@ package archive
 
 import (
 	"archive/zip"
-	"bufio"
+	"bytes"
 	"compress/flate"
 	"fmt"
 	"io"
@@ -142,21 +142,36 @@ func ReadMember(dataDir string, m Member) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	sec := io.NewSectionReader(f, m.DataOffset, m.CompSize)
-	var r io.Reader
-	switch m.Method {
-	case zip.Store:
-		r = sec
-	case zip.Deflate:
-		fr := flate.NewReader(bufio.NewReaderSize(sec, 256<<10))
-		defer fr.Close()
-		r = fr
-	default:
-		return nil, fmt.Errorf("archive: unsupported compression method %d", m.Method)
-	}
-	buf := make([]byte, m.Size)
-	if _, err := io.ReadFull(r, buf); err != nil {
+	// One read of exactly the compressed bytes: on a network mount this is a
+	// single range request.
+	raw := make([]byte, m.CompSize)
+	if _, err := f.ReadAt(raw, m.DataOffset); err != nil && !(err == io.EOF && m.CompSize == 0) {
 		return nil, fmt.Errorf("archive: reading %s from %s: %w", m.Name, m.Zip, err)
 	}
-	return buf, nil
+	data, err := Decompress(raw, m.Method, m.Size)
+	if err != nil {
+		return nil, fmt.Errorf("archive: %s from %s: %w", m.Name, m.Zip, err)
+	}
+	return data, nil
+}
+
+// Decompress turns a member's stored bytes into its contents.
+func Decompress(raw []byte, method uint16, size int64) ([]byte, error) {
+	switch method {
+	case zip.Store:
+		if int64(len(raw)) != size {
+			return nil, fmt.Errorf("stored member is %d bytes, expected %d", len(raw), size)
+		}
+		return raw, nil
+	case zip.Deflate:
+		fr := flate.NewReader(bytes.NewReader(raw))
+		defer fr.Close()
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(fr, buf); err != nil {
+			return nil, fmt.Errorf("inflating: %w", err)
+		}
+		return buf, nil
+	default:
+		return nil, fmt.Errorf("unsupported compression method %d", method)
+	}
 }

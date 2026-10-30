@@ -8,21 +8,28 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/mihai-max/ao3/issues</Support>
   <Project>https://github.com/mihai-max/ao3</Project>
-  <Overview>Search, read and download the EPUBs inside the AO3 "things" archive (105 zip files, about 746 GiB) without extracting them. On first start it indexes every zip into one SQLite file in the Index folder (about 30 GB for 20 million works; several hours, resumable). Search by title, author, fandom or tag, read chapters in the browser, and download the original .epub.[br][br]Data folder: the folder your torrent client saved the zips into. It is mounted read-only.[br]Index folder: where ao3.db is written. Put it on a share with room for about 35 GB.[br][br]Keep this on your LAN. It has no login.</Overview>
+  <Overview>Search, read and download the EPUBs inside the AO3 "things" archive (105 zip files, about 746 GiB) without extracting them. On first start it indexes every zip into one SQLite file in the Index folder (about 30 GB for 20 million works; several hours, resumable). Search by title, author, fandom or tag, read chapters in the browser, and download the original .epub.[br][br]Two ways to provide the zips:[br]1. Download the torrent to a share and set Data folder to it.[br]2. Add the magnet to Real-Debrid and fill in Real-Debrid username and WebDAV password; rclone inside the container then mounts dav.real-debrid.com and the zips are read over your internet connection. Leave Data folder empty in that case. The Extra Parameters (SYS_ADMIN, /dev/fuse) are required for this.[br][br]Index folder: where ao3.db is written. Put it on a share with room for about 35 GB.[br][br]Keep this on your LAN. It has no login.</Overview>
   <Category>MediaServer:Books Tools:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/mihai-max/ao3/HEAD/unraid/ao3.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/mihai-max/ao3/HEAD/unraid/icon.png</Icon>
-  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <ExtraParams>--restart=unless-stopped --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor:unconfined</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>The "things" torrent downloaded to a share.</Requires>
+  <Requires>The "things" torrent, either downloaded to a share or added to a Real-Debrid account.</Requires>
   <Config Name="WebUI port" Target="8080" Default="8080" Mode="tcp" Description="Port for the web interface." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
-  <Config Name="Data folder (torrent zips)" Target="/data" Default="/mnt/user/data/things" Mode="ro" Description="Folder holding queue01.zip ... queue94.zip and the other zips from the torrent. Read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/things</Config>
+  <Config Name="Data folder (torrent zips)" Target="/data" Default="" Mode="ro" Description="Folder holding queue01.zip ... queue94.zip and the other zips, if you downloaded the torrent locally. Leave EMPTY when using Real-Debrid. Read-only." Type="Path" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Index folder" Target="/index" Default="/mnt/user/appdata/ao3" Mode="rw" Description="Where the search index ao3.db is stored (about 30 GB for 20M works, about 35 GB with summary search). Use a disk share instead of appdata if your cache pool is small." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ao3</Config>
+  <Config Name="Real-Debrid username" Target="AO3_WEBDAV_USER" Default="" Mode="" Description="Your Real-Debrid username. Leave empty if the zips are in the Data folder." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Real-Debrid WebDAV password" Target="AO3_WEBDAV_PASS" Default="" Mode="" Description="The WebDAV password shown on your Real-Debrid account page (it is NOT your login password and not the API token)." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="WebDAV folder" Target="AO3_WEBDAV_PATH" Default="torrents/things" Mode="" Description="Folder on the WebDAV share that holds the zips. Real-Debrid puts each torrent under torrents/&lt;torrent name&gt;." Type="Variable" Display="always" Required="false" Mask="false">torrents/things</Config>
+  <Config Name="WebDAV URL" Target="AO3_WEBDAV_URL" Default="https://dav.real-debrid.com/" Mode="" Description="WebDAV server. Change only for a service other than Real-Debrid." Type="Variable" Display="advanced" Required="false" Mask="false">https://dav.real-debrid.com/</Config>
+  <Config Name="rclone remote (advanced)" Target="AO3_RCLONE_REMOTE" Default="" Mode="" Description="Instead of the WebDAV fields: a remote:path from your own rclone.conf, mapped into the container at /config/rclone.conf." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="rclone config folder (advanced)" Target="/config" Default="" Mode="ro" Description="Folder holding rclone.conf when using your own rclone remote." Type="Path" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Extra rclone flags (advanced)" Target="AO3_RCLONE_ARGS" Default="" Mode="" Description="Extra flags appended to rclone mount, e.g. --tpslimit 4." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id that owns the index files. 99 is Unraid's nobody." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id that owns the index files. 100 is Unraid's users." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
   <Config Name="UMASK" Target="UMASK" Default="000" Mode="" Description="File creation mask for the index files." Type="Variable" Display="advanced" Required="false" Mask="false">000</Config>
