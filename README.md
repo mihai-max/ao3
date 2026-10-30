@@ -189,9 +189,10 @@ pushes a multi-arch image (amd64 and arm64) on every push.
 | a `v1.2.3` tag | `1.2.3` |
 | any commit | `sha-<short sha>` |
 
-A new GHCR package is private. Either make it public under the repository's
-**Packages** settings, or run `docker login ghcr.io` on the Unraid server
-with a token that has `read:packages`.
+The package is public because this repository is public, so Unraid can pull
+it without logging in. If you make the repository private, either make the
+package public under its **Package settings**, or run `docker login ghcr.io`
+on the server with a token that has `read:packages`.
 
 ## Security
 

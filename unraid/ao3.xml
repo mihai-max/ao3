@@ -19,7 +19,7 @@
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>The "things" torrent downloaded to a share. Docker image is pulled from ghcr.io; if the package is private, run "docker login ghcr.io" on the server first.</Requires>
+  <Requires>The "things" torrent downloaded to a share.</Requires>
   <Config Name="WebUI port" Target="8080" Default="8080" Mode="tcp" Description="Port for the web interface." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
   <Config Name="Data folder (torrent zips)" Target="/data" Default="/mnt/user/data/things" Mode="ro" Description="Folder holding queue01.zip ... queue94.zip and the other zips from the torrent. Read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/things</Config>
   <Config Name="Index folder" Target="/index" Default="/mnt/user/appdata/ao3" Mode="rw" Description="Where the search index ao3.db is stored (about 30 GB for 20M works, about 35 GB with summary search). Use a disk share instead of appdata if your cache pool is small." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ao3</Config>
