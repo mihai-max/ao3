@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/microcosm-cc/bluemonday v1.0.27
+	github.com/nwaples/rardecode/v2 v2.4.5
 	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.61.0
 )

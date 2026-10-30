@@ -1,6 +1,11 @@
 // Package archive deals with the torrent's outer .zip files. Nothing is ever
 // extracted: the indexer walks each zip's central directory once, and the
 // reader later pulls a single EPUB straight out by byte offset.
+//
+// A zip may sit directly in the data folder, or inside a RAR archive the way
+// Real-Debrid delivers multi-file torrents (one uncompressed things.rar). In
+// both cases a Zip is "Container file, Offset, Size", and Member offsets are
+// absolute positions inside the container.
 package archive
 
 import (
@@ -15,18 +20,28 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// Zip is one outer archive in the data directory.
+// Zip is one archive of EPUBs.
 type Zip struct {
-	Name string // base name, e.g. "queue17.zip"
-	Path string
-	Size int64
-	Rank int // higher rank = later in zip_order.txt = preferred on ties
+	Name      string // display name, e.g. "queue17.zip"
+	Container string // file in the data folder that holds it: itself, or e.g. "things.rar"
+	Offset    int64  // where the zip starts inside Container
+	Size      int64
+	Rank      int // higher rank = later in zip_order.txt = preferred on ties
 }
 
-// Member locates one file inside an outer zip without its central directory.
+// Layout is everything found in the data folder.
+type Layout struct {
+	Zips     []Zip
+	Warnings []string // things that were found but cannot be used
+}
+
+// Member locates one file inside a zip. DataOffset is absolute within the
+// container file, so a member can be read with one positioned read.
 type Member struct {
+	Container  string
 	Zip        string
 	Name       string
 	DataOffset int64
@@ -38,31 +53,53 @@ type Member struct {
 var reZipName = regexp.MustCompile(`(?i)[\w.\-]+\.zip`)
 var reQueue = regexp.MustCompile(`(?i)^queue(\d+)\.zip$`)
 
-// Discover lists the *.zip files at the top of dataDir and ranks them. The
-// order comes from zip_order.txt when it names them; otherwise queueNN.zip
-// files come first in numeric order, followed by the rest alphabetically.
+// Discover lists the usable zips in dataDir in indexing order.
 func Discover(dataDir string) ([]Zip, error) {
+	l, err := Scan(dataDir)
+	return l.Zips, err
+}
+
+// Scan lists the zips at the top of dataDir, plus the zips inside any RAR
+// archives there, and ranks them. The order comes from zip_order.txt when it
+// names them; otherwise queueNN.zip files come first in numeric order,
+// followed by the rest alphabetically.
+func Scan(dataDir string) (Layout, error) {
+	var l Layout
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return nil, err
+		return l, err
 	}
-	var zips []Zip
 	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".zip") {
+		if e.IsDir() {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		zips = append(zips, Zip{Name: e.Name(), Path: filepath.Join(dataDir, e.Name()), Size: info.Size()})
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".zip":
+			l.Zips = append(l.Zips, Zip{Name: e.Name(), Container: e.Name(), Size: info.Size()})
+		case ".rar":
+			rl, err := rarLayout(filepath.Join(dataDir, e.Name()), info)
+			if err != nil {
+				l.Warnings = append(l.Warnings, fmt.Sprintf("%s: %v", e.Name(), err))
+				continue
+			}
+			zips, warnings := zipsInRar(e.Name(), info.Size(), rl.entries)
+			if len(zips) == 0 && len(warnings) == 0 {
+				warnings = append(warnings, fmt.Sprintf("%s: contains no .zip files", e.Name()))
+			}
+			l.Zips = append(l.Zips, zips...)
+			l.Warnings = append(l.Warnings, warnings...)
+		}
 	}
 
 	order := map[string]int{}
-	if data, err := os.ReadFile(filepath.Join(dataDir, "zip_order.txt")); err == nil {
-		for i, m := range reZipName.FindAllString(string(data), -1) {
+	for _, text := range Notes(dataDir) {
+		for _, m := range reZipName.FindAllString(text, -1) {
 			if _, seen := order[strings.ToLower(m)]; !seen {
-				order[strings.ToLower(m)] = i
+				order[strings.ToLower(m)] = len(order)
 			}
 		}
 	}
@@ -76,9 +113,9 @@ func Discover(dataDir string) ([]Zip, error) {
 		}
 		return 2, 0, strings.ToLower(z.Name)
 	}
-	sort.Slice(zips, func(i, j int) bool {
-		a1, a2, a3 := key(zips[i])
-		b1, b2, b3 := key(zips[j])
+	sort.SliceStable(l.Zips, func(i, j int) bool {
+		a1, a2, a3 := key(l.Zips[i])
+		b1, b2, b3 := key(l.Zips[j])
 		if a1 != b1 {
 			return a1 < b1
 		}
@@ -87,39 +124,127 @@ func Discover(dataDir string) ([]Zip, error) {
 		}
 		return a3 < b3
 	})
-	for i := range zips {
-		zips[i].Rank = i
+	for i := range l.Zips {
+		l.Zips[i].Rank = i
 	}
-	return zips, nil
+	return l, nil
+}
+
+// rarInfo caches a RAR's header walk, which over a network mount costs one
+// small read per entry.
+type rarInfo struct {
+	size    int64
+	modTime int64
+	entries []RarEntry
+}
+
+var (
+	rarCacheMu sync.Mutex
+	rarCache   = map[string]rarInfo{}
+)
+
+func rarLayout(path string, info os.FileInfo) (rarInfo, error) {
+	rarCacheMu.Lock()
+	cached, ok := rarCache[path]
+	rarCacheMu.Unlock()
+	if ok && cached.size == info.Size() && cached.modTime == info.ModTime().UnixNano() {
+		return cached, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return rarInfo{}, err
+	}
+	defer f.Close()
+	entries, err := ListRar(f, info.Size())
+	if err != nil {
+		return rarInfo{}, err
+	}
+	ri := rarInfo{size: info.Size(), modTime: info.ModTime().UnixNano(), entries: entries}
+	rarCacheMu.Lock()
+	rarCache[path] = ri
+	rarCacheMu.Unlock()
+	return ri, nil
 }
 
 // Notes returns the small .txt files shipped next to the zips
-// (extract_from_zips.txt, zip_order.txt), capped at 64 KiB each.
+// (extract_from_zips.txt, zip_order.txt), including ones inside a RAR,
+// capped at 64 KiB each.
 func Notes(dataDir string) map[string]string {
+	const maxNote = 64 << 10
 	out := map[string]string{}
-	matches, _ := filepath.Glob(filepath.Join(dataDir, "*.txt"))
-	for _, p := range matches {
-		f, err := os.Open(p)
-		if err != nil {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() {
 			continue
 		}
-		b, _ := io.ReadAll(io.LimitReader(f, 64<<10))
-		f.Close()
-		out[filepath.Base(p)] = string(b)
+		p := filepath.Join(dataDir, e.Name())
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".txt":
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+			b, _ := io.ReadAll(io.LimitReader(f, maxNote))
+			f.Close()
+			out[e.Name()] = string(b)
+		case ".rar":
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			rl, err := rarLayout(p, info)
+			if err != nil {
+				continue
+			}
+			var f *os.File
+			for _, re := range rl.entries {
+				if re.Dir || !re.Stored || re.Size > maxNote || !strings.EqualFold(filepath.Ext(re.Name), ".txt") {
+					continue
+				}
+				if f == nil {
+					if f, err = os.Open(p); err != nil {
+						break
+					}
+					defer f.Close()
+				}
+				b := make([]byte, re.PackedSize)
+				if _, err := f.ReadAt(b, re.DataOffset); err == nil {
+					out[e.Name()+"/"+filepath.Base(re.Name)] = string(b)
+				}
+			}
+		}
 	}
 	return out
 }
 
-// MemberOf records where f lives inside its zip.
-func MemberOf(zipName string, f *zip.File) (Member, error) {
+// Open opens a zip for reading its directory and members.
+func Open(dataDir string, z Zip) (*zip.Reader, io.Closer, error) {
+	f, err := os.Open(filepath.Join(dataDir, z.Container))
+	if err != nil {
+		return nil, nil, err
+	}
+	zr, err := zip.NewReader(io.NewSectionReader(f, z.Offset, z.Size), z.Size)
+	if err != nil {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s: %w", z.Name, err)
+	}
+	return zr, f, nil
+}
+
+// MemberOf records where f lives inside its container file.
+func MemberOf(z Zip, f *zip.File) (Member, error) {
 	off, err := f.DataOffset()
 	if err != nil {
 		return Member{}, err
 	}
 	return Member{
-		Zip:        zipName,
+		Container:  z.Container,
+		Zip:        z.Name,
 		Name:       f.Name,
-		DataOffset: off,
+		DataOffset: z.Offset + off,
 		CompSize:   int64(f.CompressedSize64),
 		Size:       int64(f.UncompressedSize64),
 		Method:     f.Method,
@@ -134,10 +259,14 @@ func ReadMember(dataDir string, m Member) ([]byte, error) {
 	if m.Size > MaxMemberSize {
 		return nil, fmt.Errorf("archive: %s is too large (%d bytes)", m.Name, m.Size)
 	}
-	if strings.ContainsAny(m.Zip, `/\`) {
-		return nil, fmt.Errorf("archive: bad zip name %q", m.Zip)
+	container := m.Container
+	if container == "" {
+		container = m.Zip
 	}
-	f, err := os.Open(filepath.Join(dataDir, m.Zip))
+	if strings.ContainsAny(container, `/\`) {
+		return nil, fmt.Errorf("archive: bad container name %q", container)
+	}
+	f, err := os.Open(filepath.Join(dataDir, container))
 	if err != nil {
 		return nil, err
 	}

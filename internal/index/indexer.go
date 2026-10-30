@@ -30,13 +30,14 @@ type Options struct {
 
 // ZipStatus is the live state of one zip.
 type ZipStatus struct {
-	Name   string
-	Size   int64
-	Total  int64
-	Done   int64
-	EPUBs  int64
-	Errors int64
-	State  string // pending, indexing, done, error
+	Name      string
+	Container string
+	Size      int64
+	Total     int64
+	Done      int64
+	EPUBs     int64
+	Errors    int64
+	State     string // pending, indexing, done, error
 }
 
 // Status is a snapshot of the indexer.
@@ -90,7 +91,8 @@ var ErrAlreadyRunning = errors.New("indexer already running")
 type zipState struct {
 	archive.Zip
 	idx       int
-	zr        *zip.ReadCloser
+	zr        *zip.Reader
+	closer    io.Closer
 	total     int64
 	processed int64
 	epubs     int64
@@ -147,9 +149,9 @@ func (ix *Indexer) run(ctx context.Context) error {
 	var todo []*zipState
 	statuses := make([]ZipStatus, len(zips))
 	for i, z := range zips {
-		statuses[i] = ZipStatus{Name: z.Name, Size: z.Size, State: "pending"}
+		statuses[i] = ZipStatus{Name: z.Name, Container: z.Container, Size: z.Size, State: "pending"}
 		if p, ok := prog[z.Name]; ok && p.Done && p.Size == z.Size {
-			statuses[i] = ZipStatus{Name: z.Name, Size: z.Size, Total: p.MembersTotal, Done: p.MembersDone,
+			statuses[i] = ZipStatus{Name: z.Name, Container: z.Container, Size: z.Size, Total: p.MembersTotal, Done: p.MembersDone,
 				EPUBs: p.EPUBs, Errors: p.Errors, State: "done"}
 			continue
 		}
@@ -177,7 +179,7 @@ func (ix *Indexer) run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return
 			}
-			zr, err := zip.OpenReader(zs.Path)
+			zr, closer, err := archive.Open(ix.opt.DataDir, zs.Zip)
 			if err != nil {
 				ix.fail(zs, fmt.Errorf("opening %s: %w", zs.Name, err))
 				continue
@@ -186,6 +188,7 @@ func (ix *Indexer) run(ctx context.Context) error {
 			opened = append(opened, zs)
 			openedMu.Unlock()
 			zs.zr = zr
+			zs.closer = closer
 			zs.total = int64(len(zr.File))
 			results <- result{z: zs, start: true}
 			// The producer alone reads the zip, member after member in file
@@ -226,8 +229,8 @@ func (ix *Indexer) run(ctx context.Context) error {
 
 	openedMu.Lock()
 	for _, zs := range opened {
-		if zs.zr != nil {
-			zs.zr.Close()
+		if zs.closer != nil {
+			zs.closer.Close()
 		}
 	}
 	openedMu.Unlock()
@@ -323,7 +326,7 @@ func process(j job) result {
 		r.err = j.err
 		return r
 	}
-	m, err := archive.MemberOf(j.z.Name, f)
+	m, err := archive.MemberOf(j.z.Zip, f)
 	if err != nil {
 		r.err = err
 		return r
@@ -366,8 +369,8 @@ func toRecord(w epub.Work, m archive.Member, rank int) *Record {
 		Characters: join(w.Characters), Freeforms: join(w.Freeforms), Language: w.Language,
 		Series: join(w.Series), Summary: w.Summary, Words: w.Words, Chapters: w.Chapters,
 		Published: w.Published, Updated: w.Updated,
-		Zip: m.Zip, Member: m.Name, DataOffset: m.DataOffset, CompSize: m.CompSize, Size: m.Size,
-		Method: int(m.Method), ZipRank: rank,
+		Container: m.Container, Zip: m.Zip, Member: m.Name, DataOffset: m.DataOffset, CompSize: m.CompSize,
+		Size: m.Size, Method: int(m.Method), ZipRank: rank,
 	}
 }
 
@@ -422,9 +425,9 @@ func (ix *Indexer) write(results <-chan result) error {
 		if err := saveProgress(zs, true); err != nil {
 			return err
 		}
-		if zs.zr != nil {
-			zs.zr.Close()
-			zs.zr = nil
+		if zs.closer != nil {
+			zs.closer.Close()
+			zs.closer = nil
 		}
 		ix.mu.Lock()
 		ix.st.Zips[zs.idx].State = "done"

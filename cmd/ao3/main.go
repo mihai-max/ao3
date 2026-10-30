@@ -8,7 +8,6 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
 	"errors"
 	"flag"
@@ -243,10 +242,11 @@ func inspect(args []string) error {
 	n := fs.Int("n", 5, "how many EPUBs to parse and print")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: ao3 inspect [-n 5] FILE.zip|DATA_DIR")
+		return errors.New("usage: ao3 inspect [-n 5] DATA_DIR | FILE.zip | FILE.rar | DATA_DIR/name.zip (also inside a RAR)")
 	}
 	target := fs.Arg(0)
-	if cfg := rmount.FromEnv(env("AO3_DATA", "/data")); cfg.Enabled() && strings.HasPrefix(filepath.Clean(target)+"/", filepath.Clean(cfg.MountPoint)+"/") {
+	dataDir := env("AO3_DATA", "/data")
+	if cfg := rmount.FromEnv(dataDir); cfg.Enabled() && strings.HasPrefix(filepath.Clean(target)+"/", filepath.Clean(cfg.MountPoint)+"/") {
 		cfg.Logger = log.Default()
 		m, err := rmount.Start(context.Background(), cfg)
 		if err != nil {
@@ -254,14 +254,78 @@ func inspect(args []string) error {
 		}
 		defer m.Close()
 	}
-	if st, err := os.Stat(target); err == nil && st.IsDir() {
+	st, err := os.Stat(target)
+	switch {
+	case err == nil && st.IsDir():
 		return inspectDir(target)
+	case err == nil && strings.EqualFold(filepath.Ext(target), ".rar"):
+		return inspectRar(target, st.Size())
+	case err == nil:
+		return inspectZip(archive.Zip{Name: filepath.Base(target), Container: filepath.Base(target), Size: st.Size()}, filepath.Dir(target), *n)
 	}
-	zr, err := zip.OpenReader(target)
+	// Not a file on disk: maybe a zip inside a RAR, named like DATA_DIR/queue85.zip.
+	dir, base := filepath.Split(target)
+	zips, derr := archive.Discover(filepath.Clean(dir))
+	if derr != nil {
+		return err
+	}
+	for _, z := range zips {
+		if strings.EqualFold(z.Name, base) {
+			return inspectZip(z, filepath.Clean(dir), *n)
+		}
+	}
+	return err
+}
+
+func inspectRar(path string, size int64) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	defer zr.Close()
+	defer f.Close()
+	entries, err := archive.ListRar(f, size)
+	if err != nil {
+		return err
+	}
+	var stored, zips int
+	var total int64
+	fmt.Printf("%s: %d entries, %s\n", path, len(entries), human(uint64(size)))
+	for _, e := range entries {
+		flags := ""
+		if !e.Stored {
+			flags += " COMPRESSED"
+		}
+		if e.Split {
+			flags += " SPLIT"
+		}
+		if e.Encrypted {
+			flags += " ENCRYPTED"
+		}
+		if e.Dir {
+			flags += " dir"
+		}
+		if e.Stored {
+			stored++
+		}
+		if strings.EqualFold(filepath.Ext(e.Name), ".zip") {
+			zips++
+		}
+		total += e.Size
+		fmt.Printf("  %12s  @%-14d %s%s\n", human(uint64(e.Size)), e.DataOffset, e.Name, flags)
+	}
+	fmt.Printf("%d zip files, %d of %d entries stored uncompressed, %s of content\n", zips, stored, len(entries), human(uint64(total)))
+	if stored != len(entries) {
+		fmt.Println("WARNING: compressed entries cannot be read in place; only stored entries are indexed")
+	}
+	return nil
+}
+
+func inspectZip(z archive.Zip, dataDir string, n int) error {
+	zr, closer, err := archive.Open(dataDir, z)
+	if err != nil {
+		return err
+	}
+	defer closer.Close()
 
 	exts := map[string]int{}
 	methods := map[uint16]int{}
@@ -278,7 +342,11 @@ func inspect(args []string) error {
 		total += f.UncompressedSize64
 		comp += f.CompressedSize64
 	}
-	fmt.Printf("%s: %d members, %s stored, %s uncompressed\n", target, len(zr.File), human(comp), human(total))
+	where := z.Name
+	if z.Container != z.Name {
+		where = fmt.Sprintf("%s (inside %s at offset %d)", z.Name, z.Container, z.Offset)
+	}
+	fmt.Printf("%s: %d members, %s stored, %s uncompressed\n", where, len(zr.File), human(comp), human(total))
 	fmt.Println("by extension:")
 	for _, k := range sortedKeys(exts) {
 		fmt.Printf("  %-8s %d\n", k, exts[k])
@@ -296,7 +364,7 @@ func inspect(args []string) error {
 	}
 	shown := 0
 	for _, f := range zr.File {
-		if shown >= *n || !strings.EqualFold(filepath.Ext(f.Name), ".epub") {
+		if shown >= n || !strings.EqualFold(filepath.Ext(f.Name), ".epub") {
 			continue
 		}
 		shown++
@@ -325,17 +393,24 @@ func inspect(args []string) error {
 }
 
 func inspectDir(dir string) error {
-	zips, err := archive.Discover(dir)
+	layout, err := archive.Scan(dir)
 	if err != nil {
 		return err
 	}
 	var total int64
-	fmt.Printf("%d zip files in %s, in indexing order:\n", len(zips), dir)
-	for _, z := range zips {
+	fmt.Printf("%d zip files in %s, in indexing order:\n", len(layout.Zips), dir)
+	for _, z := range layout.Zips {
 		total += z.Size
-		fmt.Printf("  %3d  %-28s %s\n", z.Rank, z.Name, human(uint64(z.Size)))
+		in := ""
+		if z.Container != z.Name {
+			in = "  in " + z.Container
+		}
+		fmt.Printf("  %3d  %-28s %10s%s\n", z.Rank, z.Name, human(uint64(z.Size)), in)
 	}
 	fmt.Printf("total %s\n", human(uint64(total)))
+	for _, w := range layout.Warnings {
+		fmt.Println("WARNING:", w)
+	}
 	for name, text := range archive.Notes(dir) {
 		fmt.Printf("\n--- %s ---\n%s\n", name, text)
 	}

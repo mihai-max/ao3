@@ -37,6 +37,7 @@ type Record struct {
 	Chapters      string
 	Published     string
 	Updated       string
+	Container     string // file holding the zip; empty means the zip itself
 	Zip           string
 	Member        string
 	DataOffset    int64
@@ -48,7 +49,7 @@ type Record struct {
 
 // Loc returns where the EPUB lives inside the archives.
 func (r *Record) Loc() archive.Member {
-	return archive.Member{Zip: r.Zip, Name: r.Member, DataOffset: r.DataOffset, CompSize: r.CompSize, Size: r.Size, Method: uint16(r.Method)}
+	return archive.Member{Container: r.Container, Zip: r.Zip, Name: r.Member, DataOffset: r.DataOffset, CompSize: r.CompSize, Size: r.Size, Method: uint16(r.Method)}
 }
 
 // DB wraps the SQLite handle.
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS works(
   chapters      TEXT NOT NULL DEFAULT '',
   published     TEXT NOT NULL DEFAULT '',
   updated       TEXT NOT NULL DEFAULT '',
+  container     TEXT NOT NULL DEFAULT '',
   zip           TEXT NOT NULL,
   member        TEXT NOT NULL,
   data_offset   INTEGER NOT NULL,
@@ -160,6 +162,10 @@ func Open(path string, ftsSummary bool) (*DB, error) {
 		sqldb.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
+	if err := migrate(sqldb); err != nil {
+		sqldb.Close()
+		return nil, err
+	}
 	var v string
 	err = sqldb.QueryRow(`SELECT value FROM meta WHERE key='fts_summary'`).Scan(&v)
 	switch {
@@ -181,6 +187,37 @@ func Open(path string, ftsSummary bool) (*DB, error) {
 	return db, nil
 }
 
+// migrate brings an index created by an older version up to date.
+func migrate(sqldb *sql.DB) error {
+	rows, err := sqldb.Query(`PRAGMA table_info(works)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasContainer := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "container" {
+			hasContainer = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasContainer {
+		if _, err := sqldb.Exec(`ALTER TABLE works ADD COLUMN container TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("adding container column: %w", err)
+		}
+	}
+	return nil
+}
+
 // Close closes the database.
 func (db *DB) Close() error { return db.SQL.Close() }
 
@@ -188,14 +225,14 @@ func (db *DB) Close() error { return db.SQL.Close() }
 // copy from the later zip (higher rank) wins.
 const upsertSQL = `
 INSERT INTO works(id,title,author,fandom,rating,warnings,category,relationships,characters,freeforms,
-  language,series,summary,words,chapters,published,updated,zip,member,data_offset,comp_size,size,method,zip_rank)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  language,series,summary,words,chapters,published,updated,container,zip,member,data_offset,comp_size,size,method,zip_rank)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   title=excluded.title, author=excluded.author, fandom=excluded.fandom, rating=excluded.rating,
   warnings=excluded.warnings, category=excluded.category, relationships=excluded.relationships,
   characters=excluded.characters, freeforms=excluded.freeforms, language=excluded.language,
   series=excluded.series, summary=excluded.summary, words=excluded.words, chapters=excluded.chapters,
-  published=excluded.published, updated=excluded.updated, zip=excluded.zip, member=excluded.member,
+  published=excluded.published, updated=excluded.updated, container=excluded.container, zip=excluded.zip, member=excluded.member,
   data_offset=excluded.data_offset, comp_size=excluded.comp_size, size=excluded.size,
   method=excluded.method, zip_rank=excluded.zip_rank
 WHERE excluded.updated > works.updated
@@ -204,18 +241,18 @@ WHERE excluded.updated > works.updated
 func upsert(ctx context.Context, stmt *sql.Stmt, r *Record) error {
 	_, err := stmt.ExecContext(ctx, r.ID, r.Title, r.Author, r.Fandom, r.Rating, r.Warnings, r.Category,
 		r.Relationships, r.Characters, r.Freeforms, r.Language, r.Series, r.Summary, r.Words, r.Chapters,
-		r.Published, r.Updated, r.Zip, r.Member, r.DataOffset, r.CompSize, r.Size, r.Method, r.ZipRank)
+		r.Published, r.Updated, r.Container, r.Zip, r.Member, r.DataOffset, r.CompSize, r.Size, r.Method, r.ZipRank)
 	return err
 }
 
 const recordCols = `id,title,author,fandom,rating,warnings,category,relationships,characters,freeforms,
-  language,series,summary,words,chapters,published,updated,zip,member,data_offset,comp_size,size,method,zip_rank`
+  language,series,summary,words,chapters,published,updated,container,zip,member,data_offset,comp_size,size,method,zip_rank`
 
 func scanRecord(row interface{ Scan(...any) error }) (*Record, error) {
 	r := &Record{}
 	err := row.Scan(&r.ID, &r.Title, &r.Author, &r.Fandom, &r.Rating, &r.Warnings, &r.Category,
 		&r.Relationships, &r.Characters, &r.Freeforms, &r.Language, &r.Series, &r.Summary, &r.Words,
-		&r.Chapters, &r.Published, &r.Updated, &r.Zip, &r.Member, &r.DataOffset, &r.CompSize, &r.Size,
+		&r.Chapters, &r.Published, &r.Updated, &r.Container, &r.Zip, &r.Member, &r.DataOffset, &r.CompSize, &r.Size,
 		&r.Method, &r.ZipRank)
 	return r, err
 }

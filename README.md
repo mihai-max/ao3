@@ -82,8 +82,10 @@ with rclone and reads the zips over your internet connection. The index is
 still built and stored locally.
 
 1. On Real-Debrid, add the magnet link under **Torrents** and wait until it
-   shows as finished. Real-Debrid keeps it as a folder named after the
-   torrent, `things`, so the files appear on WebDAV at `/torrents/things/`.
+   shows as finished. Real-Debrid packs a multi-file torrent into one
+   uncompressed RAR, so on WebDAV it appears as `/torrents/things/things.rar`.
+   That is fine: the app reads the zips inside the RAR in place, without
+   unpacking anything. Loose zips in the same folder work too.
 2. On your Real-Debrid account page, find the **WebDAV** section and note the
    WebDAV password. It is a separate password, not your login password and
    not the API token. Your WebDAV username is your Real-Debrid username.
@@ -111,6 +113,7 @@ What to expect:
 | Indexing | reads all 746 GiB once over the internet. On a gigabit line that is 2 to 3 hours at best, usually longer because Real-Debrid limits speed per connection. It resumes if interrupted. |
 | Opening a work | one range request per EPUB, so about half a second to two seconds before a chapter shows. Chapters of the same work are then instant. |
 | Downloads | the EPUB is fetched from Real-Debrid and passed through. |
+| The RAR | only its headers are read, one small request per zip. Entries must be stored uncompressed, which is how Real-Debrid makes them; a compressed or multi-volume RAR is reported on the status page and skipped. |
 | Real-Debrid limits | about 16 parallel connections per account, and the WebDAV listing only shows the newest 200 torrents. Links expire after a while, but WebDAV refreshes them on access. |
 
 The status page shows whether the mount is up and the last lines rclone
@@ -186,7 +189,17 @@ docker run --rm -v /mnt/user/data/things:/data:ro ghcr.io/mihai-max/ao3:latest i
 ```
 
 With Real-Debrid, pass the WebDAV variables and FUSE flags instead of the
-folder, and `inspect` mounts the share for the duration of the command:
+folder, and `inspect` mounts the share for the duration of the command.
+`inspect /data` lists what it found, including zips inside `things.rar`;
+`inspect /data/things.rar` lists the RAR's entries and whether they are
+stored uncompressed; `inspect /data/queue85.zip` opens that zip even when it
+only exists inside the RAR:
+
+```bash
+docker run --rm --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor:unconfined \
+  -e AO3_WEBDAV_USER=you -e AO3_WEBDAV_PASS=webdav-password \
+  ghcr.io/mihai-max/ao3:latest inspect /data
+```
 
 ```bash
 docker run --rm --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor:unconfined \
@@ -280,13 +293,14 @@ go run ./cmd/mkfixture ./sample && go run ./cmd/ao3 serve --data ./sample --inde
 
 `mkfixture` writes two small zips of synthetic AO3-style EPUBs, including a
 work that appears in both, so the whole app can be tried without the torrent.
+`mkfixture -rar DIR` packs them into a `things.rar` like Real-Debrid does.
 
 Layout:
 
 | Path | Purpose |
 |---|---|
 | `cmd/ao3` | the single binary |
-| `internal/archive` | zip discovery, ordering, direct reads by offset |
+| `internal/archive` | zip discovery (loose or inside a RAR), ordering, direct reads by offset, RAR header parser |
 | `internal/epub` | EPUB parsing and AO3 preface metadata |
 | `internal/index` | SQLite schema, FTS5 search, the parallel resumable indexer |
 | `internal/web` | HTTP handlers, chapter rendering and sanitizing, templates |

@@ -211,6 +211,31 @@ func WriteArchive(path string, works []FakeWork, method uint16, nameFn func(Fake
 	return zw.Close()
 }
 
+// WriteSampleRarDir builds a data directory the way Real-Debrid serves a
+// multi-file torrent: a single uncompressed things.rar holding the zips.
+func WriteSampleRarDir(dir string) error {
+	tmp, err := os.MkdirTemp("", "ao3-rar")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := WriteSampleDataDir(tmp); err != nil {
+		return err
+	}
+	var files []RarFile
+	for _, name := range []string{"queue01.zip", "jan_may_2023.zip", "zip_order.txt"} {
+		data, err := os.ReadFile(filepath.Join(tmp, name))
+		if err != nil {
+			return err
+		}
+		files = append(files, RarFile{Name: "things/" + name, Data: data})
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return WriteRar5(filepath.Join(dir, "things.rar"), files)
+}
+
 // WriteSampleDataDir builds a data directory with two archives in which
 // the second one carries an updated copy of one work from the first.
 func WriteSampleDataDir(dir string) error {

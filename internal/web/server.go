@@ -412,12 +412,12 @@ func asciiName(s string) string {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	st := s.Indexer.Status()
+	layout, _ := archive.Scan(s.DataDir)
 	if len(st.Zips) == 0 {
 		// Not run yet in this process: show what the database knows.
-		zips, _ := archive.Discover(s.DataDir)
 		prog, _ := s.DB.AllProgress(ctx)
-		for _, z := range zips {
-			zs := index.ZipStatus{Name: z.Name, Size: z.Size, State: "pending"}
+		for _, z := range layout.Zips {
+			zs := index.ZipStatus{Name: z.Name, Container: z.Container, Size: z.Size, State: "pending"}
 			if p, ok := prog[z.Name]; ok {
 				zs.Total, zs.Done, zs.EPUBs, zs.Errors = p.MembersTotal, p.MembersDone, p.EPUBs, p.Errors
 				if p.Done && p.Size == z.Size {
@@ -449,8 +449,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		Notes     map[string]string
 		FTSSum    bool
 		Mount     *rmount.State
+		Warnings  []string
 	}{s.common("Index status"), st, totalSize, doneSize, s.DB.Count(ctx), s.DB.SizeOnDisk(), s.DB.Path,
-		s.DataDir, archive.Notes(s.DataDir), s.DB.FTSSummary, mountState(s.Mount)})
+		s.DataDir, archive.Notes(s.DataDir), s.DB.FTSSummary, mountState(s.Mount), layout.Warnings})
 }
 
 func mountState(m *rmount.Mount) *rmount.State {

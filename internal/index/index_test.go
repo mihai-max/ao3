@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,5 +215,48 @@ func TestInterruptAndResume(t *testing.T) {
 	db.SQL.QueryRow(`SELECT count(*) FROM works_fts WHERE works_fts MATCH 'author : "writer"*'`).Scan(&fts)
 	if fts != 2000 {
 		t.Errorf("fts rows matching = %d, want 2000", fts)
+	}
+}
+
+func TestIndexThroughRar(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	if err := testutil.WriteSampleRarDir(data); err != nil {
+		t.Fatal(err)
+	}
+	db, err := index.Open(filepath.Join(dir, "ao3.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ix := index.NewIndexer(db, index.Options{DataDir: data, Workers: 2})
+	if err := ix.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := ix.Status()
+	if st.Indexed != 51 || len(st.Zips) != 2 || st.Zips[0].Name != "queue01.zip" || st.Zips[0].Container != "things.rar" {
+		t.Fatalf("status = %+v", st)
+	}
+	if n := db.Count(context.Background()); n != 50 {
+		t.Errorf("count = %d", n)
+	}
+	r, err := db.Get(context.Background(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Container != "things.rar" || r.Zip != "jan_may_2023.zip" {
+		t.Errorf("record = %+v", r)
+	}
+	raw, err := archive.ReadMember(data, r.Loc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := epub.Open(raw)
+	if err != nil || b.WorkMeta().Title != "The Long Way Home (Revised)" {
+		t.Errorf("read back from rar: %v %q", err, b.WorkMeta().Title)
+	}
+	notes := archive.Notes(data)
+	if !strings.Contains(notes["things.rar/zip_order.txt"], "queue01.zip") {
+		t.Errorf("notes = %v", notes)
 	}
 }
