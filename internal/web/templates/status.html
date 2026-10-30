@@ -1,0 +1,41 @@
+{{define "head"}}{{if .St.Running}}<meta http-equiv="refresh" content="10">{{end}}{{end}}
+{{define "content"}}
+<h1>Index status</h1>
+<div class="cards">
+  <div class="card"><span class="big">{{num .Works}}</span><span>works in index</span></div>
+  <div class="card"><span class="big">{{bytes .DBSize}}</span><span>index size</span></div>
+  <div class="card"><span class="big">{{pct .DoneSize .TotalSize}}%</span><span>of {{bytes .TotalSize}} indexed</span></div>
+</div>
+<progress max="100" value="{{pct .DoneSize .TotalSize}}"></progress>
+<p>
+  {{if .St.Running}}<strong>Indexing</strong> since {{.St.StartedAt.Format "2006-01-02 15:04"}} ({{since .St.StartedAt}}), {{num .St.Indexed}} EPUBs so far. This page refreshes every 10 seconds.
+  {{else}}Idle.{{if not .St.FinishedAt.IsZero}} Last run finished {{.St.FinishedAt.Format "2006-01-02 15:04"}}.{{end}}
+  <form method="post" action="/status/scan" class="inline"><button type="submit">Scan for new or unfinished archives</button></form>{{end}}
+</p>
+{{if .St.LastError}}<p class="warn">{{.St.LastError}}</p>{{end}}
+<table class="zips">
+<thead><tr><th>Archive</th><th>Size</th><th>State</th><th>Members</th><th>EPUBs</th><th>Errors</th></tr></thead>
+<tbody>
+{{range .St.Zips}}
+<tr class="{{.State}}"><td>{{.Name}}</td><td>{{bytes .Size}}</td><td>{{.State}}{{if eq .State "indexing"}} {{pct .Done .Total}}%{{end}}</td>
+<td>{{if .Total}}{{num .Done}} / {{num .Total}}{{end}}</td><td>{{num .EPUBs}}</td><td>{{num .Errors}}</td></tr>
+{{else}}
+<tr><td colspan="6" class="warn">No .zip files found in {{$.DataDir}}. Map the folder holding the torrent's zips to /data.</td></tr>
+{{end}}
+</tbody>
+</table>
+{{if .St.RecentErrors}}
+<h2>Recent errors</h2>
+<ul class="errors">{{range .St.RecentErrors}}<li><code>{{.}}</code></li>{{end}}</ul>
+{{end}}
+<h2>Paths</h2>
+<dl class="tags">
+  <dt>Data (zips)</dt><dd><code>{{.DataDir}}</code></dd>
+  <dt>Index file</dt><dd><code>{{.DBPath}}</code></dd>
+  <dt>Summary search</dt><dd>{{if .FTSSum}}on{{else}}off (set AO3_FTS_SUMMARY=true before the first index to turn it on){{end}}</dd>
+</dl>
+{{if .Notes}}
+<h2>Notes shipped with the torrent</h2>
+{{range $name, $text := .Notes}}<h3>{{$name}}</h3><pre class="note">{{$text}}</pre>{{end}}
+{{end}}
+{{end}}

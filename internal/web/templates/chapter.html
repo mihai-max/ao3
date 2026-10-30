@@ -1,0 +1,15 @@
+{{define "content"}}
+<nav class="chapnav">
+  <a href="/work/{{.W.ID}}">← {{.W.Title}}</a>
+  <span class="muted">{{.Heading}} · {{add .N 1}} / {{add .Last 1}}</span>
+  <a class="button small" href="/work/{{.W.ID}}/download">Download EPUB</a>
+</nav>
+<article class="reader">
+{{.Body}}
+</article>
+<nav class="pager reader-pager">
+  {{if gt .N 0}}<a rel="prev" href="/work/{{.W.ID}}/ch/{{sub .N 1}}">← {{(index .Chapters (sub .N 1)).Title}}</a>{{else}}<span></span>{{end}}
+  <a href="/work/{{.W.ID}}">Contents</a>
+  {{if lt .N .Last}}<a rel="next" href="/work/{{.W.ID}}/ch/{{add .N 1}}">{{(index .Chapters (add .N 1)).Title}} →</a>{{else}}<span></span>{{end}}
+</nav>
+{{end}}

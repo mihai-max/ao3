@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>ao3-archive</Name>
+  <Repository>ghcr.io/mihai-max/ao3:latest</Repository>
+  <Registry>https://github.com/mihai-max/ao3/pkgs/container/ao3</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/mihai-max/ao3/issues</Support>
+  <Project>https://github.com/mihai-max/ao3</Project>
+  <Overview>Search, read and download the EPUBs inside the AO3 "things" archive (105 zip files, about 746 GiB) without extracting them. On first start it indexes every zip into one SQLite file in the Index folder (about 30 GB for 20 million works; several hours, resumable). Search by title, author, fandom or tag, read chapters in the browser, and download the original .epub.[br][br]Data folder: the folder your torrent client saved the zips into. It is mounted read-only.[br]Index folder: where ao3.db is written. Put it on a share with room for about 35 GB.[br][br]Keep this on your LAN. It has no login.</Overview>
+  <Category>MediaServer:Books Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/mihai-max/ao3/HEAD/unraid/ao3.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/mihai-max/ao3/HEAD/unraid/icon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>The "things" torrent downloaded to a share. Docker image is pulled from ghcr.io; if the package is private, run "docker login ghcr.io" on the server first.</Requires>
+  <Config Name="WebUI port" Target="8080" Default="8080" Mode="tcp" Description="Port for the web interface." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Data folder (torrent zips)" Target="/data" Default="/mnt/user/data/things" Mode="ro" Description="Folder holding queue01.zip ... queue94.zip and the other zips from the torrent. Read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/things</Config>
+  <Config Name="Index folder" Target="/index" Default="/mnt/user/appdata/ao3" Mode="rw" Description="Where the search index ao3.db is stored (about 30 GB for 20M works, about 35 GB with summary search). Use a disk share instead of appdata if your cache pool is small." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ao3</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id that owns the index files. 99 is Unraid's nobody." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id that owns the index files. 100 is Unraid's users." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="000" Mode="" Description="File creation mask for the index files." Type="Variable" Display="advanced" Required="false" Mask="false">000</Config>
+  <Config Name="Index workers" Target="AO3_INDEX_WORKERS" Default="0" Mode="" Description="How many CPU threads parse EPUBs while indexing. 0 uses all of them. Lower it to keep the server responsive." Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+  <Config Name="Searchable summaries" Target="AO3_FTS_SUMMARY" Default="false" Mode="" Description="true makes summaries searchable (index about 20% larger). Only applies when the index is first created." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Index on start" Target="AO3_AUTO_INDEX" Default="true" Mode="" Description="Index new or unfinished zips in the background whenever the container starts." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+</Container>

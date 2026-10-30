@@ -1,0 +1,8 @@
+/ao3
+/mkfixture
+*.db
+*.db-wal
+*.db-shm
+/index/
+/zips/
+/sample/

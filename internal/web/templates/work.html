@@ -1,0 +1,35 @@
+{{define "content"}}
+<article class="workpage">
+  <h1>{{.W.Title}}</h1>
+  {{if .W.Author}}<p class="byline">by {{range $i, $a := tags .W.Author}}{{if $i}}, {{end}}<a href="/search?field=author&q={{phrase $a}}">{{$a}}</a>{{end}}</p>{{end}}
+  <dl class="tags">
+    {{if .W.Rating}}<dt>Rating</dt><dd>{{.W.Rating}}</dd>{{end}}
+    {{if .W.Warnings}}<dt>Warnings</dt><dd>{{.W.Warnings}}</dd>{{end}}
+    {{if .W.Category}}<dt>Category</dt><dd>{{.W.Category}}</dd>{{end}}
+    {{if .W.Fandom}}<dt>Fandom</dt><dd>{{range $i, $t := tags .W.Fandom}}{{if $i}}, {{end}}<a href="/search?field=fandom&q={{phrase $t}}">{{$t}}</a>{{end}}</dd>{{end}}
+    {{if .W.Relationships}}<dt>Relationships</dt><dd>{{template "taglist" (tags .W.Relationships)}}</dd>{{end}}
+    {{if .W.Characters}}<dt>Characters</dt><dd>{{template "taglist" (tags .W.Characters)}}</dd>{{end}}
+    {{if .W.Freeforms}}<dt>Tags</dt><dd>{{template "taglist" (tags .W.Freeforms)}}</dd>{{end}}
+    {{if .W.Series}}<dt>Series</dt><dd>{{.W.Series}}</dd>{{end}}
+    {{if .W.Language}}<dt>Language</dt><dd>{{.W.Language}}</dd>{{end}}
+    <dt>Stats</dt><dd>
+      {{if .W.Published}}Published {{.W.Published}} · {{end}}{{if and .W.Updated (ne .W.Updated .W.Published)}}Updated {{.W.Updated}} · {{end}}
+      {{if .W.Words}}{{num .W.Words}} words · {{end}}{{if .W.Chapters}}{{.W.Chapters}} chapters{{end}}
+    </dd>
+    {{if gt .W.ID 0}}<dt>AO3 id</dt><dd>{{.W.ID}}</dd>{{end}}
+    <dt>File</dt><dd class="muted">{{.W.Zip}} → {{.W.Member}} ({{bytes .W.Size}})</dd>
+  </dl>
+  {{if .W.Summary}}<h2>Summary</h2><blockquote class="summary">{{summary .W.Summary}}</blockquote>{{end}}
+  <p class="actions">
+    {{if .Chapters}}<a class="button primary" href="/work/{{.W.ID}}/ch/{{if gt (len .Chapters) 1}}1{{else}}0{{end}}">Read</a>{{end}}
+    <a class="button" href="/work/{{.W.ID}}/download">Download EPUB</a>
+  </p>
+  {{if .LoadErr}}<p class="warn">This EPUB could not be opened: {{.LoadErr}}</p>{{end}}
+  {{if .Chapters}}
+  <h2>Contents</h2>
+  <ol class="toc" start="0">{{range .Chapters}}<li><a href="/work/{{$.W.ID}}/ch/{{.N}}">{{.Title}}</a></li>{{end}}</ol>
+  {{end}}
+</article>
+{{end}}
+
+{{define "taglist"}}{{range $i, $t := .}}{{if $i}}, {{end}}<a href="/search?field=tags&q={{phrase $t}}">{{$t}}</a>{{end}}{{end}}

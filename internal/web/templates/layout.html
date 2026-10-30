@@ -1,0 +1,43 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+{{block "head" .}}{{end}}
+<title>{{.Title}} · AO3 Archive</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">AO3 Archive</a>
+  <form class="searchbar" action="/search" method="get" role="search">
+    <input type="search" name="q" value="{{.Q}}" placeholder="Search titles, authors, fandoms, tags…" aria-label="Search">
+    <select name="field" aria-label="Search in">
+      {{range $f := (list "any" "title" "author" "fandom" "tags" "summary")}}
+      <option value="{{$f}}"{{if eq $f $.Field}} selected{{end}}>{{if eq $f "any"}}Everything{{else}}{{$f}}{{end}}</option>
+      {{end}}
+    </select>
+    <button type="submit">Search</button>
+  </form>
+  <a class="statuslink" href="/status">{{if .Indexing}}<span class="dot"></span>Indexing…{{else}}Status{{end}}</a>
+</header>
+<main>
+{{template "content" .}}
+</main>
+</body>
+</html>{{end}}
+
+{{define "workcard"}}
+<li class="work">
+  <h3><a href="/work/{{.ID}}">{{.Title}}</a>{{if .Author}} <span class="by">by {{.Author}}</span>{{end}}</h3>
+  <p class="meta">
+    {{if .Fandom}}<span class="fandom">{{.Fandom}}</span>{{end}}
+    {{if .Rating}}<span class="pill">{{.Rating}}</span>{{end}}
+    {{if .Words}}<span>{{num .Words}} words</span>{{end}}
+    {{if .Chapters}}<span>{{.Chapters}} ch</span>{{end}}
+    {{if .Updated}}<span>{{.Updated}}</span>{{end}}
+  </p>
+  {{if .Summary}}<div class="summary">{{summary .Summary}}</div>{{end}}
+</li>
+{{end}}

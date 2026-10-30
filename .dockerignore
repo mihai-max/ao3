@@ -1,0 +1,10 @@
+.git
+.github
+*.db
+*.db-wal
+*.db-shm
+index/
+zips/
+sample/
+unraid/
+README.md

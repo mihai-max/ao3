@@ -1,0 +1,13 @@
+{{define "content"}}
+<section class="hero">
+  <h1>{{num .Works}} works indexed</h1>
+  <p class="muted">{{.ZipsDone}} of {{.ZipsAll}} archives indexed · index size {{bytes .DBSize}}
+  {{if .Indexing}} · <a href="/status">indexing in progress</a>{{else if lt .ZipsDone .ZipsAll}} · <a href="/status">some archives not indexed yet</a>{{end}}</p>
+  {{if eq .ZipsAll 0}}<p class="warn">No .zip files were found in the data folder. Check the /data path mapping on the <a href="/status">status page</a>.</p>{{end}}
+  <p class="tips">Tips: <code>"exact phrase"</code>, <code>-exclude</code>, <code>prefix*</code>, or paste an AO3 work id.</p>
+</section>
+{{if .Recent}}
+<h2>Newest works (by AO3 id)</h2>
+<ul class="works">{{range .Recent}}{{template "workcard" .}}{{end}}</ul>
+{{end}}
+{{end}}

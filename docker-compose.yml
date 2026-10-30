@@ -1,0 +1,22 @@
+# Plain Docker / Docker Compose. On Unraid use unraid/ao3.xml instead.
+#
+#   ./zips   the folder the torrent downloaded into (the 105 .zip files)
+#   ./index  where the SQLite index is written (~30 GB for ~20M works)
+#
+# Both are bind mounts to folders on your disk; nothing is kept inside the
+# container image or in a Docker-managed volume.
+services:
+  ao3:
+    image: ghcr.io/mihai-max/ao3:latest
+    container_name: ao3
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PUID: "1000"          # owner of files written to ./index
+      PGID: "1000"
+      AO3_INDEX_WORKERS: "0"   # 0 = use every CPU while indexing
+      AO3_FTS_SUMMARY: "false" # true = summaries searchable, ~20% bigger index
+    volumes:
+      - ./zips:/data:ro
+      - ./index:/index

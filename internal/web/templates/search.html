@@ -1,0 +1,21 @@
+{{define "content"}}
+{{if .Direct}}<p class="direct">Work id {{.Direct.ID}}: <a href="/work/{{.Direct.ID}}">{{.Direct.Title}}</a></p>{{end}}
+{{if .Q}}
+<div class="resultbar">
+  <p>{{if .Res.Capped}}More than {{num .Res.Total}}{{else}}{{num .Res.Total}}{{end}} results for <strong>{{.Q}}</strong>{{if ne .Field "any"}} in {{.Field}}{{end}} <span class="muted">({{.Res.Elapsed}})</span></p>
+  <p class="sort">Sort:
+    {{range $s := (list "relevance" "updated" "words" "title")}}
+      {{if or (eq $s $.Sort) (and (eq $s "relevance") (eq $.Sort ""))}}<strong>{{$s}}</strong>{{else}}<a href="/search?q={{$.Q}}&field={{$.Field}}&sort={{$s}}">{{$s}}</a>{{end}}
+    {{end}}
+  </p>
+</div>
+{{if .Res.Works}}
+<ol class="works" start="{{.From}}">{{range .Res.Works}}{{template "workcard" .}}{{end}}</ol>
+<nav class="pager">
+  {{if gt .Page 1}}<a href="/search?q={{.Q}}&field={{.Field}}&sort={{.Sort}}&page={{sub .Page 1}}">← Previous</a>{{end}}
+  <span>Page {{.Page}} of {{.Pages}}</span>
+  {{if lt .Page .Pages}}<a href="/search?q={{.Q}}&field={{.Field}}&sort={{.Sort}}&page={{add .Page 1}}">Next →</a>{{end}}
+</nav>
+{{else}}<p>No works matched. {{if eq .Field "summary"}}Summary search only works if the index was built with summary search turned on.{{end}}</p>{{end}}
+{{else}}<p>Type something to search for.</p>{{end}}
+{{end}}
