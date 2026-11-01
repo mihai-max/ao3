@@ -91,3 +91,16 @@ pre.note { background: var(--card); border: 1px solid var(--line); padding: .8re
   .searchbar select { max-width: 6.5rem; }
   .reader { font-size: 1.05rem; }
 }
+
+/* startup and upgrade page */
+.startup { max-width: 40rem; }
+.startup progress { height: 1.2rem; margin: 1rem 0 .3rem; }
+.bigpct { font-size: 1.1rem; margin: 0 0 1rem; }
+.bigpct strong { font-size: 1.6rem; }
+.steps { list-style: none; padding: 0; }
+.steps li { padding: .45rem 0; border-bottom: 1px solid var(--line); }
+.steps .mark { display: inline-block; width: 1.4rem; font-weight: 700; }
+.step-done, .step-skipped { color: var(--muted); }
+.step-running { font-weight: 600; }
+.step-running .muted { font-weight: normal; }
+.steps .detail { display: block; margin-left: 1.4rem; font-size: .9rem; overflow-wrap: anywhere; }

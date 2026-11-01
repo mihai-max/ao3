@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -193,52 +192,13 @@ func Open(path string, ftsSummary bool) (*DB, error) {
 		return nil, err
 	}
 	db.FTSSummary = v == "true"
-	if err := upgrade(sqldb, db.FTSSummary); err != nil {
-		sqldb.Close()
-		return nil, err
-	}
+	// An index from an older version keeps its old triggers until Upgrade
+	// replaces them; CREATE TRIGGER IF NOT EXISTS leaves them alone.
 	if _, err := sqldb.Exec(triggers(db.FTSSummary)); err != nil {
 		sqldb.Close()
 		return nil, fmt.Errorf("creating triggers: %w", err)
 	}
 	return db, nil
-}
-
-// upgrade moves an index built by an older version to schemaVersion. It runs
-// before the indexer starts, so nothing else is writing.
-func upgrade(sqldb *sql.DB, ftsSummary bool) error {
-	var v string
-	if err := sqldb.QueryRow(`SELECT value FROM meta WHERE key='schema'`).Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if n, _ := strconv.Atoi(v); n >= schemaVersion {
-		return nil
-	}
-	log.Printf("index: upgrading the index file (one time; may take a few minutes on a large index)")
-	start := time.Now()
-	tx, err := sqldb.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	steps := []string{
-		`DROP TRIGGER IF EXISTS works_ai`,
-		`DROP TRIGGER IF EXISTS works_ad`,
-		`INSERT OR REPLACE INTO stats(key,n) SELECT 'works', count(*) FROM works`,
-		sortIndexes,
-		triggers(ftsSummary),
-		`INSERT OR REPLACE INTO meta(key,value) VALUES('schema','` + strconv.Itoa(schemaVersion) + `')`,
-	}
-	for _, q := range steps {
-		if _, err := tx.Exec(q); err != nil {
-			return fmt.Errorf("upgrading index: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	log.Printf("index: upgrade finished in %s", time.Since(start).Round(time.Second))
-	return nil
 }
 
 // migrate brings an index created by an older version up to date.

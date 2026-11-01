@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -140,7 +142,37 @@ func serve(args []string) error {
 	fs.Parse(args)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	logger := log.Default()
 
+	// Answer on the port from the first second: a startup page with the
+	// current stage, and a progress bar while the index is upgraded.
+	var stage atomic.Value
+	stage.Store("Starting")
+	var upgrade atomic.Pointer[index.UpgradeState]
+	sw := &web.Switch{}
+	sw.Set(web.StartupHandler(func() web.Startup {
+		st := web.Startup{Stage: stage.Load().(string)}
+		if u := upgrade.Load(); u != nil {
+			p := u.Snapshot()
+			st.Upgrade = &p
+		}
+		return st
+	}))
+	ln, err := net.Listen("tcp", c.addr)
+	if err != nil {
+		return err
+	}
+	hs := &http.Server{Handler: sw, ReadHeaderTimeout: 10 * time.Second}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- hs.Serve(ln) }()
+	logger.Printf("ao3 %s: listening on %s", version, c.addr)
+	defer func() {
+		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		hs.Shutdown(shut)
+	}()
+
+	stage.Store("Mounting remote storage")
 	mnt, err := mountRemote(ctx, c)
 	if err != nil {
 		return err
@@ -159,12 +191,26 @@ func serve(args []string) error {
 			}
 		}()
 	}
+
+	stage.Store("Opening the index")
 	db, err := openDB(c)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	logger := log.Default()
+	if db.NeedsUpgrade() {
+		stage.Store("Upgrading the index")
+		st := &index.UpgradeState{}
+		upgrade.Store(st)
+		if err := db.Upgrade(ctx, st, logger); err != nil {
+			if ctx.Err() != nil {
+				logger.Printf("index: upgrade stopped; finished steps are kept and the rest continues next start")
+				return nil
+			}
+			return fmt.Errorf("upgrading the index: %w", err)
+		}
+	}
+
 	ix := index.NewIndexer(db, index.Options{DataDir: c.data, Workers: c.workers, Logger: logger})
 	srv, err := web.New(db, ix, c.data, logger)
 	if err != nil {
@@ -174,6 +220,8 @@ func serve(args []string) error {
 	if mnt != nil {
 		srv.Mount = mnt
 	}
+	sw.Set(srv.Handler())
+	logger.Printf("ao3 %s: ready on %s, data %s, index %s (uid %d gid %d)", version, c.addr, c.data, c.index, os.Getuid(), os.Getgid())
 
 	done := make(chan struct{})
 	if c.autoIndex {
@@ -187,18 +235,19 @@ func serve(args []string) error {
 		close(done)
 	}
 
-	hs := &http.Server{Addr: c.addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		logger.Printf("shutting down: stopping web server")
-		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		hs.Shutdown(shut)
-	}()
-	logger.Printf("ao3 %s: serving on %s, data %s, index %s (uid %d gid %d)", version, c.addr, c.data, c.index, os.Getuid(), os.Getgid())
-	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			stop()
+			<-done
+			return err
+		}
+	case <-ctx.Done():
 	}
+	logger.Printf("shutting down: stopping web server")
+	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	hs.Shutdown(shut)
+	cancel()
 	<-done // let the indexer commit its last batch
 	logger.Printf("shutting down: index closed, web server stopped")
 	return nil
@@ -225,6 +274,11 @@ func runIndex(args []string) error {
 		return err
 	}
 	defer db.Close()
+	if db.NeedsUpgrade() {
+		if err := db.Upgrade(ctx, &index.UpgradeState{}, log.Default()); err != nil {
+			return fmt.Errorf("upgrading the index: %w", err)
+		}
+	}
 	var pats []string
 	if only != "" {
 		pats = strings.Split(only, ",")

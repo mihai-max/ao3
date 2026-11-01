@@ -52,6 +52,11 @@ func Drop(indexDir string) error {
 	if err := syscall.Setuid(uid); err != nil {
 		return fmt.Errorf("setuid %d: %w", uid, err)
 	}
+	// Changing user makes Linux mark the process non-dumpable, which locks
+	// it out of its own /proc/self/io; the upgrade progress bar reads that.
+	// Only processes of the same user (rclone, in this container) gain the
+	// right to inspect it.
+	syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 1, 0)
 	if um := os.Getenv("UMASK"); um != "" {
 		if v, err := strconv.ParseUint(um, 8, 32); err == nil {
 			syscall.Umask(int(v))

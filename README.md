@@ -245,6 +245,22 @@ When the same work appears in several zips, for example in a queue zip and
 again in a later update zip, the copy with the newest AO3 "Updated" date wins.
 On a tie, the zip listed later in `zip_order.txt` wins.
 
+## Updating
+
+Pull the new image and restart the container; your index folder is kept.
+When an update changes the index format, the first start upgrades the index
+in place. The web page answers right away with a progress bar showing the
+current step, how much of the index has been read and written, and an
+estimate of the time left; the container log prints the same as a text bar
+every 15 seconds. On 20 million works expect roughly 30 minutes on an SSD
+and a few hours on the Unraid array.
+
+It is safe to stop the container during an upgrade. Each step is saved when
+it finishes, so the next start continues with the step that was running.
+Sorting uses temporary files in a `.tmp` folder inside the index folder,
+removed when the upgrade ends, so the index folder needs a few GB free
+beyond the index itself.
+
 ## Settings
 
 | Variable | Default | Meaning |
