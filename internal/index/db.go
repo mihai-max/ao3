@@ -7,11 +7,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mihai-max/ao3/internal/archive"
@@ -57,10 +57,6 @@ type DB struct {
 	SQL        *sql.DB
 	Path       string
 	FTSSummary bool
-
-	countMu   sync.Mutex
-	count     int64
-	countedAt time.Time
 }
 
 const schema = `
@@ -101,6 +97,8 @@ CREATE TABLE IF NOT EXISTS zip_progress(
   errors        INTEGER NOT NULL DEFAULT 0,
   done_at       TEXT
 );
+-- Row counts kept up to date by triggers, so pages never run count(*).
+CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, n INTEGER NOT NULL);
 -- Contentless FTS: the text lives only in works, the FTS index holds tokens.
 CREATE VIRTUAL TABLE IF NOT EXISTS works_fts USING fts5(
   title, author, fandom, tags, summary,
@@ -120,14 +118,26 @@ func ftsColumns(summary bool) string {
     ` + s
 }
 
+// schemaVersion 2 added the works counter and the sort indexes.
+const schemaVersion = 2
+
+// sortIndexes let date, length and title sorts walk an index instead of
+// sorting every match. They hold only the key and the rowid.
+const sortIndexes = `
+CREATE INDEX IF NOT EXISTS works_updated ON works(updated);
+CREATE INDEX IF NOT EXISTS works_words ON works(words);
+CREATE INDEX IF NOT EXISTS works_title ON works(title COLLATE NOCASE);`
+
 func triggers(summary bool) string {
 	cols := ftsColumns(summary)
 	return `
 CREATE TRIGGER IF NOT EXISTS works_ai AFTER INSERT ON works BEGIN
   INSERT INTO works_fts(rowid, title, author, fandom, tags, summary) VALUES (new.id, ` + cols + `);
+  UPDATE stats SET n = n + 1 WHERE key = 'works';
 END;
 CREATE TRIGGER IF NOT EXISTS works_ad AFTER DELETE ON works BEGIN
   DELETE FROM works_fts WHERE rowid = old.id;
+  UPDATE stats SET n = n - 1 WHERE key = 'works';
 END;
 CREATE TRIGGER IF NOT EXISTS works_au AFTER UPDATE ON works BEGIN
   DELETE FROM works_fts WHERE rowid = old.id;
@@ -170,8 +180,11 @@ func Open(path string, ftsSummary bool) (*DB, error) {
 	err = sqldb.QueryRow(`SELECT value FROM meta WHERE key='fts_summary'`).Scan(&v)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		// Brand new index.
 		v = strconv.FormatBool(ftsSummary)
-		if _, err := sqldb.Exec(`INSERT INTO meta(key,value) VALUES('fts_summary',?),('schema','1')`, v); err != nil {
+		_, err := sqldb.Exec(`INSERT INTO meta(key,value) VALUES('fts_summary',?),('schema',?);
+			INSERT OR IGNORE INTO stats(key,n) VALUES('works',0);`+sortIndexes, v, strconv.Itoa(schemaVersion))
+		if err != nil {
 			sqldb.Close()
 			return nil, err
 		}
@@ -180,11 +193,52 @@ func Open(path string, ftsSummary bool) (*DB, error) {
 		return nil, err
 	}
 	db.FTSSummary = v == "true"
+	if err := upgrade(sqldb, db.FTSSummary); err != nil {
+		sqldb.Close()
+		return nil, err
+	}
 	if _, err := sqldb.Exec(triggers(db.FTSSummary)); err != nil {
 		sqldb.Close()
 		return nil, fmt.Errorf("creating triggers: %w", err)
 	}
 	return db, nil
+}
+
+// upgrade moves an index built by an older version to schemaVersion. It runs
+// before the indexer starts, so nothing else is writing.
+func upgrade(sqldb *sql.DB, ftsSummary bool) error {
+	var v string
+	if err := sqldb.QueryRow(`SELECT value FROM meta WHERE key='schema'`).Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if n, _ := strconv.Atoi(v); n >= schemaVersion {
+		return nil
+	}
+	log.Printf("index: upgrading the index file (one time; may take a few minutes on a large index)")
+	start := time.Now()
+	tx, err := sqldb.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	steps := []string{
+		`DROP TRIGGER IF EXISTS works_ai`,
+		`DROP TRIGGER IF EXISTS works_ad`,
+		`INSERT OR REPLACE INTO stats(key,n) SELECT 'works', count(*) FROM works`,
+		sortIndexes,
+		triggers(ftsSummary),
+		`INSERT OR REPLACE INTO meta(key,value) VALUES('schema','` + strconv.Itoa(schemaVersion) + `')`,
+	}
+	for _, q := range steps {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("upgrading index: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("index: upgrade finished in %s", time.Since(start).Round(time.Second))
+	return nil
 }
 
 // migrate brings an index created by an older version up to date.
@@ -262,19 +316,12 @@ func (db *DB) Get(ctx context.Context, id int64) (*Record, error) {
 	return scanRecord(db.SQL.QueryRowContext(ctx, `SELECT `+recordCols+` FROM works WHERE id=?`, id))
 }
 
-// Count returns the number of indexed works, cached for a minute because
-// COUNT(*) over tens of millions of rows is not free.
+// Count returns the number of indexed works from the trigger-maintained
+// counter; it never scans the table.
 func (db *DB) Count(ctx context.Context) int64 {
-	db.countMu.Lock()
-	defer db.countMu.Unlock()
-	if time.Since(db.countedAt) < time.Minute {
-		return db.count
-	}
 	var n int64
-	if err := db.SQL.QueryRowContext(ctx, `SELECT count(*) FROM works`).Scan(&n); err == nil {
-		db.count, db.countedAt = n, time.Now()
-	}
-	return db.count
+	db.SQL.QueryRowContext(ctx, `SELECT n FROM stats WHERE key='works'`).Scan(&n)
+	return n
 }
 
 // SizeOnDisk returns the bytes used by the database and its WAL.
@@ -325,17 +372,6 @@ type SearchParams struct {
 	Limit  int
 	Offset int
 }
-
-// SearchResult holds one page of matches.
-type SearchResult struct {
-	Works   []*Record
-	Total   int64 // capped at CountCap
-	Capped  bool
-	Elapsed time.Duration
-}
-
-// CountCap bounds how many matches we count for the "N results" label.
-const CountCap = 10000
 
 var fields = map[string]bool{"title": true, "author": true, "fandom": true, "tags": true, "summary": true}
 
@@ -410,53 +446,155 @@ func tokenize(q string) []token {
 	}
 }
 
-// Search runs a full-text search.
+// SearchResult holds one page of matches.
+type SearchResult struct {
+	Works  []*Record
+	Total  int64 // exact up to CountCap
+	Capped bool  // more than CountCap matches
+	Sort   string
+	// SortFallback is set when relevance was asked for but there were too
+	// many matches to rank, so the newest works are shown instead.
+	SortFallback bool
+	// MaxOffset is how deep paging may go for this result (0 = no limit).
+	MaxOffset int
+	Elapsed   time.Duration
+}
+
+// Search cost tiers, measured on a 1M-work index and chosen so that no page
+// costs more than about a second on the full ~20M-work archive:
+//
+//   - up to RankLimit matches: rank by relevance, or join all matches and sort;
+//   - up to CountCap matches: collect the matching ids, then walk a sort
+//     index and keep the ids that are in the set;
+//   - more: walk the sort index and test each row against the query. The
+//     matches are dense enough (>10% of works) that a page fills quickly,
+//     but deep pages get slower, so paging is limited to HugeMaxOffset.
+var (
+	RankLimit     int64 = 100000
+	CountCap      int64 = 2000000
+	HugeMaxOffset       = 1000
+)
+
+var sortIndex = map[string]struct{ index, order string }{
+	"updated": {"works_updated", "updated DESC"},
+	"words":   {"works_words", "words DESC"},
+	"title":   {"works_title", "title COLLATE NOCASE"},
+}
+
+const bm25 = "bm25(works_fts, 10.0, 4.0, 3.0, 1.0, 0.5)"
+
+// Search runs a full-text search. Every path is bounded: no query here sorts
+// or joins more than CountCap matches.
 func (db *DB) Search(ctx context.Context, p SearchParams) (*SearchResult, error) {
 	start := time.Now()
 	if p.Limit <= 0 || p.Limit > 200 {
 		p.Limit = 50
 	}
 	match := BuildMatch(p.Query, p.Field)
-	res := &SearchResult{}
+	res := &SearchResult{Sort: p.Sort}
+	if res.Sort == "" {
+		res.Sort = "relevance"
+	}
 	if match == "" {
 		return res, nil
 	}
-	order := "bm25(works_fts, 10.0, 4.0, 3.0, 1.0, 0.5)"
-	switch p.Sort {
-	case "words":
-		order = "w.words DESC"
-	case "updated":
-		order = "w.updated DESC"
-	case "title":
-		order = "w.title COLLATE NOCASE"
-	}
-	q := `SELECT ` + prefixed("w.", recordCols) + ` FROM works_fts JOIN works w ON w.id = works_fts.rowid
-	      WHERE works_fts MATCH ? ORDER BY ` + order + ` LIMIT ? OFFSET ?`
-	rows, err := db.SQL.QueryContext(ctx, q, match, p.Limit, p.Offset)
+	err := db.SQL.QueryRowContext(ctx,
+		`SELECT count(*) FROM (SELECT rowid FROM works_fts WHERE works_fts MATCH ? LIMIT ?)`, match, CountCap+1).Scan(&res.Total)
 	if err != nil {
 		return nil, fmt.Errorf("search %q: %w", match, err)
 	}
+	if res.Total > CountCap {
+		res.Total, res.Capped = CountCap, true
+	}
+	if _, ok := sortIndex[res.Sort]; !ok && res.Sort != "relevance" {
+		res.Sort = "relevance"
+	}
+	if res.Sort == "relevance" && res.Total > RankLimit {
+		res.Sort, res.SortFallback = "updated", true
+	}
+
+	var q string
+	si := sortIndex[res.Sort]
+	switch {
+	case res.Sort == "relevance":
+		q = `SELECT rowid FROM works_fts WHERE works_fts MATCH ? ORDER BY ` + bm25 + ` LIMIT ? OFFSET ?`
+	case res.Total <= RankLimit:
+		q = `SELECT w.id FROM works_fts JOIN works w ON w.id = works_fts.rowid WHERE works_fts MATCH ?
+		     ORDER BY w.` + si.order + ` LIMIT ? OFFSET ?`
+	case !res.Capped:
+		q = `SELECT w.id FROM works w INDEXED BY ` + si.index + `
+		     WHERE w.id IN (SELECT rowid FROM works_fts WHERE works_fts MATCH ?)
+		     ORDER BY w.` + si.order + ` LIMIT ? OFFSET ?`
+	default:
+		res.MaxOffset = HugeMaxOffset
+		if p.Offset > HugeMaxOffset {
+			p.Offset = HugeMaxOffset
+		}
+		q = `SELECT w.id FROM works w INDEXED BY ` + si.index + `
+		     WHERE EXISTS (SELECT 1 FROM works_fts WHERE works_fts MATCH ? AND works_fts.rowid = w.id)
+		     ORDER BY w.` + si.order + ` LIMIT ? OFFSET ?`
+	}
+	ids, err := db.queryIDs(ctx, q, match, p.Limit, p.Offset)
+	if err != nil {
+		return nil, fmt.Errorf("search %q: %w", match, err)
+	}
+	if res.Works, err = db.getMany(ctx, ids); err != nil {
+		return nil, err
+	}
+	res.Elapsed = time.Since(start).Round(100 * time.Microsecond)
+	return res, nil
+}
+
+func (db *DB) queryIDs(ctx context.Context, q string, args ...any) ([]int64, error) {
+	rows, err := db.SQL.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// getMany loads records by id, keeping the order of ids.
+func (db *DB) getMany(ctx context.Context, ids []int64) ([]*Record, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	marks := make([]string, len(ids))
+	for i, id := range ids {
+		args[i], marks[i] = id, "?"
+	}
+	rows, err := db.SQL.QueryContext(ctx, `SELECT `+recordCols+` FROM works WHERE id IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := make(map[int64]*Record, len(ids))
 	for rows.Next() {
 		r, err := scanRecord(rows)
 		if err != nil {
 			return nil, err
 		}
-		res.Works = append(res.Works, r)
+		byID[r.ID] = r
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	err = db.SQL.QueryRowContext(ctx,
-		`SELECT count(*) FROM (SELECT rowid FROM works_fts WHERE works_fts MATCH ? LIMIT ?)`, match, CountCap+1).Scan(&res.Total)
-	if err != nil {
-		return nil, err
+	out := make([]*Record, 0, len(ids))
+	for _, id := range ids {
+		if r, ok := byID[id]; ok {
+			out = append(out, r)
+		}
 	}
-	if res.Total > CountCap {
-		res.Total, res.Capped = CountCap, true
-	}
-	res.Elapsed = time.Since(start).Round(100 * time.Microsecond)
-	return res, nil
+	return out, nil
 }
 
 func prefixed(p, cols string) string {

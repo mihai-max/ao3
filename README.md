@@ -56,14 +56,15 @@ For about **20 million EPUBs**:
 | What | Size |
 |---|---|
 | The torrent's zips, kept as they are | 746 GiB |
-| Search index, default settings | **about 28 GB** |
-| Search index with searchable summaries | about 35 GB |
+| Search index, default settings | **about 30 GB** |
+| Search index with searchable summaries | about 36 GB |
 | Extra space for extraction | none |
 | Memory while serving | well under 1 GB |
 
 The index figures are measured, not guessed. A benchmark wrote 300,000 works
 with AO3-like field lengths and word frequencies and got 1,426 bytes per work
-by default and 1,738 with summary search. Reproduce it with:
+by default and 1,738 with summary search. The indexes that make date, length
+and title sorting fast add another 69 bytes per work. Reproduce it with:
 
 ```bash
 AO3_SIZE_BENCH=300000 go test ./internal/index -run SizeEstimate -v
@@ -136,7 +137,7 @@ command, for example `--tpslimit 4` to go easier on a server.
 So on Unraid the index is **`/mnt/user/appdata/ao3/ao3.db`**. If your appdata
 lives on a small cache SSD, point the Index folder at a disk share instead,
 for example `/mnt/user/data/ao3-index`. An SSD makes search faster, so use one
-if it has about 35 GB free.
+if it has about 36 GB free.
 
 ## Install on Unraid
 
@@ -228,6 +229,17 @@ Tags cover relationships, characters, additional tags, warnings, category,
 rating and series. Tag and author links on a work page run those searches.
 Summary search only works when `AO3_FTS_SUMMARY=true` was set before the
 index was first built.
+
+Every search stays fast however many works match, because none of them ranks
+or sorts the whole archive. Up to 100,000 matches are ranked by relevance.
+Beyond that the newest works are shown first, which the page says, and the
+other sort orders still work. Past 2,000,000 matches, paging stops at page 21,
+so add a word or pick a field to narrow it.
+
+Pages never wait on the data folder. The list of archives is read in the
+background and refreshed every 10 minutes or with the scan button on the
+status page. A page that still takes more than 30 seconds shows a message
+instead of leaving the browser waiting.
 
 When the same work appears in several zips, for example in a queue zip and
 again in a later update zip, the copy with the newest AO3 "Updated" date wins.

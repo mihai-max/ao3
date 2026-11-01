@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mihai-max/ao3/internal/epub"
 	"github.com/mihai-max/ao3/internal/index"
@@ -37,6 +39,7 @@ func newServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.ScanArchives(context.Background())
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -131,5 +134,52 @@ func TestPages(t *testing.T) {
 	}
 	if res, body := get(t, ts, "/healthz"); res.StatusCode != 200 || body != "ok\n" {
 		t.Errorf("healthz: %d %q", res.StatusCode, body)
+	}
+}
+
+// A data folder whose reads never return (a stalled network mount) must not
+// stop pages from loading. A FIFO blocks os.Open until a writer appears.
+func TestPagesDoNotWaitForStalledDataFolder(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	os.MkdirAll(data, 0o755)
+	fifo := filepath.Join(data, "things.rar")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	defer func() {
+		// Unblock the background scan so the test can exit cleanly.
+		if f, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+			f.Close()
+		}
+	}()
+	db, err := index.Open(filepath.Join(dir, "index", "ao3.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ix := index.NewIndexer(db, index.Options{DataDir: data})
+	s, err := web.New(db, ix, data, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	client := http.Client{Timeout: 3 * time.Second}
+	for _, p := range []string{"/", "/status", "/search?q=love", "/search?q=love&sort=title"} {
+		start := time.Now()
+		res, err := client.Get(ts.URL + p)
+		if err != nil {
+			t.Fatalf("%s blocked on the stalled data folder: %v", p, err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 {
+			t.Errorf("%s: %d", p, res.StatusCode)
+		}
+		if p != "/search?q=love" && p != "/search?q=love&sort=title" && !strings.Contains(string(body), "hecking the archives") {
+			t.Errorf("%s does not say the archives are being checked", p)
+		}
+		t.Logf("%s answered in %s", p, time.Since(start).Round(time.Millisecond))
 	}
 }

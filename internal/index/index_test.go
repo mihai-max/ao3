@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,5 +259,91 @@ func TestIndexThroughRar(t *testing.T) {
 	notes := archive.Notes(data)
 	if !strings.Contains(notes["things.rar/zip_order.txt"], "queue01.zip") {
 		t.Errorf("notes = %v", notes)
+	}
+}
+
+// The three sorted-search strategies must return the same page.
+func TestSearchTiersAgree(t *testing.T) {
+	_, db := setup(t)
+	ctx := context.Background()
+	data := filepath.Join(filepath.Dir(filepath.Dir(db.Path)), "data")
+	if err := index.NewIndexer(db, index.Options{DataDir: data}).Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func(r, c int64, h int) { index.RankLimit, index.CountCap, index.HugeMaxOffset = r, c, h }(index.RankLimit, index.CountCap, index.HugeMaxOffset)
+
+	ids := func(res *index.SearchResult) []int64 {
+		var out []int64
+		for _, w := range res.Works {
+			out = append(out, w.ID)
+		}
+		return out
+	}
+	for _, sort := range []string{"updated", "words", "title"} {
+		var pages [][]int64
+		var tiers []string
+		for _, lim := range []struct{ rank, count int64 }{{1000, 1000}, {5, 1000}, {5, 10}} {
+			index.RankLimit, index.CountCap = lim.rank, lim.count
+			res, err := db.Search(ctx, index.SearchParams{Query: "fluff", Field: "tags", Sort: sort, Limit: 7, Offset: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pages = append(pages, ids(res))
+			tiers = append(tiers, fmt.Sprintf("total=%d capped=%v max=%d", res.Total, res.Capped, res.MaxOffset))
+		}
+		if len(pages[0]) != 7 {
+			t.Fatalf("%s: page has %d works", sort, len(pages[0]))
+		}
+		for i := 1; i < len(pages); i++ {
+			// Ties may be ordered differently by the join path, so compare
+			// the sort keys rather than ids for that tier.
+			if i == 2 && !equalIDs(pages[1], pages[2]) {
+				t.Errorf("%s: index tiers disagree: %v vs %v (%v)", sort, pages[1], pages[2], tiers)
+			}
+		}
+		if !strings.Contains(tiers[2], "capped=true") || !strings.Contains(tiers[0], "capped=false") {
+			t.Errorf("%s: tiers not exercised: %v", sort, tiers)
+		}
+	}
+	// Relevance falls back to newest-first when there are too many matches.
+	index.RankLimit, index.CountCap = 5, 1000
+	res, err := db.Search(ctx, index.SearchParams{Query: "fluff", Field: "tags"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sort != "updated" || !res.SortFallback {
+		t.Errorf("fallback: sort=%s fallback=%v", res.Sort, res.SortFallback)
+	}
+	for i := 1; i < len(res.Works); i++ {
+		if res.Works[i].Updated > res.Works[i-1].Updated {
+			t.Errorf("not newest first at %d", i)
+		}
+	}
+}
+
+func equalIDs(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestCounterSurvivesUpserts(t *testing.T) {
+	data, db := setup(t)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ { // second run re-upserts nothing new
+		if err := index.NewIndexer(db, index.Options{DataDir: data}).Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var real int64
+	db.SQL.QueryRow(`SELECT count(*) FROM works`).Scan(&real)
+	if got := db.Count(ctx); got != real || real != 50 {
+		t.Errorf("counter %d, table %d", got, real)
 	}
 }

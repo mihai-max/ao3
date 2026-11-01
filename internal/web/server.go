@@ -45,15 +45,17 @@ type Server struct {
 	// Mount is the rclone mount serving DataDir, or nil for a local folder.
 	Mount *rmount.Mount
 
-	pages  map[string]*template.Template
-	policy *bluemonday.Policy
-	cache  *bookCache
+	pages   map[string]*template.Template
+	policy  *bluemonday.Policy
+	cache   *bookCache
+	archive *layoutCache
 }
 
 // New builds a server.
 func New(db *index.DB, ix *index.Indexer, dataDir string, logger *log.Logger) (*Server, error) {
 	s := &Server{DB: db, Indexer: ix, DataDir: dataDir, Logger: logger, BaseCtx: context.Background(),
-		policy: newPolicy(), cache: newBookCache(256 << 20), pages: map[string]*template.Template{}}
+		policy: newPolicy(), cache: newBookCache(256 << 20), pages: map[string]*template.Template{},
+		archive: newLayoutCache(dataDir)}
 	funcs := template.FuncMap{
 		"num":     formatNum,
 		"bytes":   formatBytes,
@@ -84,18 +86,39 @@ func New(db *index.DB, ix *index.Indexer, dataDir string, logger *log.Logger) (*
 	return s, nil
 }
 
+// ScanArchives rescans the data folder and waits for the result.
+func (s *Server) ScanArchives(ctx context.Context) {
+	select {
+	case <-s.archive.refresh():
+	case <-ctx.Done():
+	}
+}
+
+// pageTimeout bounds how long an HTML page may take. Slow pages show a
+// message instead of leaving the browser waiting forever.
+const pageTimeout = 30 * time.Second
+
+const timeoutPage = `<!doctype html><meta charset="utf-8"><title>Still working</title>
+<link rel="stylesheet" href="/static/style.css"><main><h1>This page took too long</h1>
+<p>The server is busy, usually because indexing is using the disk or the remote storage is slow.
+Try again in a moment, or check the <a href="/status">status page</a>.</p></main>`
+
+func page(h http.HandlerFunc) http.Handler {
+	return http.TimeoutHandler(h, pageTimeout, timeoutPage)
+}
+
 // Handler returns the routed handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheFor(24*time.Hour, http.FileServerFS(static))))
-	mux.HandleFunc("GET /{$}", s.home)
-	mux.HandleFunc("GET /search", s.search)
-	mux.HandleFunc("GET /work/{id}", s.work)
-	mux.HandleFunc("GET /work/{id}/ch/{n}", s.chapter)
+	mux.Handle("GET /{$}", page(s.home))
+	mux.Handle("GET /search", page(s.search))
+	mux.Handle("GET /work/{id}", page(s.work))
+	mux.Handle("GET /work/{id}/ch/{n}", page(s.chapter))
 	mux.HandleFunc("GET /work/{id}/res/{path...}", s.resource)
 	mux.HandleFunc("GET /work/{id}/download", s.download)
-	mux.HandleFunc("GET /status", s.status)
+	mux.Handle("GET /status", page(s.status))
 	mux.HandleFunc("POST /status/scan", s.scan)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.DB.SQL.PingContext(r.Context()); err != nil {
@@ -169,10 +192,10 @@ func (s *Server) fail(w http.ResponseWriter, status int, msg string) {
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	recent, _ := s.DB.Recent(ctx, 20)
-	zips, _ := archive.Discover(s.DataDir)
+	snap := s.archive.get()
 	prog, _ := s.DB.AllProgress(ctx)
 	done := 0
-	for _, z := range zips {
+	for _, z := range snap.Layout.Zips {
 		if p, ok := prog[z.Name]; ok && p.Done {
 			done++
 		}
@@ -182,9 +205,10 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		Works    int64
 		ZipsDone int
 		ZipsAll  int
+		Scanned  bool
 		DBSize   int64
 		Recent   []*index.Record
-	}{s.common("Search"), s.DB.Count(ctx), done, len(zips), s.DB.SizeOnDisk(), recent})
+	}{s.common("Search"), s.DB.Count(ctx), done, len(snap.Layout.Zips), snap.Ready, s.DB.SizeOnDisk(), recent})
 }
 
 const pageSize = 50
@@ -219,6 +243,9 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pages := int((res.Total + pageSize - 1) / pageSize)
+	if res.MaxOffset > 0 {
+		pages = min(pages, res.MaxOffset/pageSize+1)
+	}
 	s.render(w, http.StatusOK, "search", struct {
 		common
 		Res    *index.SearchResult
@@ -412,7 +439,8 @@ func asciiName(s string) string {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	st := s.Indexer.Status()
-	layout, _ := archive.Scan(s.DataDir)
+	snap := s.archive.get()
+	layout := snap.Layout
 	if len(st.Zips) == 0 {
 		// Not run yet in this process: show what the database knows.
 		prog, _ := s.DB.AllProgress(ctx)
@@ -450,8 +478,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		FTSSum    bool
 		Mount     *rmount.State
 		Warnings  []string
+		Scanned   bool
+		ScannedAt time.Time
+		ScanErr   error
 	}{s.common("Index status"), st, totalSize, doneSize, s.DB.Count(ctx), s.DB.SizeOnDisk(), s.DB.Path,
-		s.DataDir, archive.Notes(s.DataDir), s.DB.FTSSummary, mountState(s.Mount), layout.Warnings})
+		s.DataDir, snap.Notes, s.DB.FTSSummary, mountState(s.Mount), layout.Warnings, snap.Ready, snap.Scanned, snap.Err})
 }
 
 func mountState(m *rmount.Mount) *rmount.State {
@@ -463,6 +494,7 @@ func mountState(m *rmount.Mount) *rmount.State {
 }
 
 func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
+	s.archive.refresh()
 	if !s.Indexer.Running() {
 		go func() {
 			if err := s.Indexer.Run(s.BaseCtx); err != nil && !errors.Is(err, context.Canceled) {

@@ -1,4 +1,4 @@
-{{define "head"}}{{if .St.Running}}<meta http-equiv="refresh" content="10">{{end}}{{end}}
+{{define "head"}}{{if or .St.Running (not .Scanned)}}<meta http-equiv="refresh" content="10">{{end}}{{end}}
 {{define "content"}}
 <h1>Index status</h1>
 <div class="cards">
@@ -14,6 +14,7 @@
 </p>
 {{if .St.LastError}}<p class="warn">{{.St.LastError}}</p>{{end}}
 {{range .Warnings}}<p class="warn">{{.}}</p>{{end}}
+{{if not .Scanned}}<p class="muted">Checking the archives in the data folder… this page refreshes when it is done.</p>{{else if .ScanErr}}<p class="warn">Could not read the data folder: {{.ScanErr}}</p>{{end}}
 <table class="zips">
 <thead><tr><th>Archive</th><th>Size</th><th>State</th><th>Members</th><th>EPUBs</th><th>Errors</th></tr></thead>
 <tbody>
@@ -34,6 +35,7 @@
   <dt>Data (zips)</dt><dd><code>{{.DataDir}}</code>{{if .Mount}} ← {{.Mount.Describe}}{{end}}</dd>
   {{if .Mount}}<dt>Remote mount</dt><dd>{{if .Mount.Mounted}}mounted{{else}}<span class="warn">not mounted</span>{{end}}{{if .Mount.Restarts}} · rclone restarted {{.Mount.Restarts}} times{{end}}{{if .Mount.LastErr}}<br><code>{{.Mount.LastErr}}</code>{{end}}</dd>{{end}}
   <dt>Index file</dt><dd><code>{{.DBPath}}</code></dd>
+  {{if .Scanned}}<dt>Archives checked</dt><dd>{{.ScannedAt.Format "2006-01-02 15:04"}} (rechecked every 10 minutes or with the scan button)</dd>{{end}}
   <dt>Summary search</dt><dd>{{if .FTSSum}}on{{else}}off (set AO3_FTS_SUMMARY=true before the first index to turn it on){{end}}</dd>
 </dl>
 {{if and .Mount .Mount.Recent}}
